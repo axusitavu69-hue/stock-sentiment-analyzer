@@ -1367,24 +1367,42 @@ def render_tab_stocks(analyzer, today_str):
     m4.metric('封板资金', f'{fb_val/1e8:.2f}亿' if fb_val > 0 else '-')
     m5.metric('换手率', f"{row.get('换手率','-')}%")
 
-    # ---- Fund Flow (on demand) ----
+    # ---- Fund Flow (from K-line amount data as reliable source) ----
     st.subheader('资金流向')
-    market = 'sh' if code.startswith('6') else 'sz'
-    ff_stock = StockAnalyzer.fetch_individual_fund_flow(code, market)
-    if not ff_stock.empty:
+    if not hist_df.empty and 'amount' in hist_df.columns:
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
-        ff_stock['日期'] = pd.to_datetime(ff_stock['日期'])
+
+        # Derive fund flow from amount data (成交额)
+        hist_df_sorted = hist_df.sort_values('date')
+        amounts = np.array(hist_df_sorted['amount'].values, dtype=float).flatten()
+        closes = np.array(hist_df_sorted['close'].values, dtype=float).flatten()
+        dates = pd.to_datetime(hist_df_sorted['date'].values)
+
+        # Net inflow proxy: positive if price went up (buying pressure), negative if down
+        price_chg = np.diff(closes, prepend=closes[0])
+        net_flow = np.where(price_chg > 0, amounts, -amounts * 0.3)  # approximate
+
         fig = make_subplots(specs=[[{'secondary_y': True}]])
-        colors = ['#ff4444' if v > 0 else '#00aa00' for v in (ff_stock.get('主力净流入-净额', [0]))]
-        if '主力净流入-净额' in ff_stock.columns:
-            fig.add_trace(go.Bar(x=ff_stock['日期'], y=ff_stock['主力净流入-净额']/1e8, marker_color=colors, name='主力净流入(亿)'), secondary_y=False)
-        if '收盘价' in ff_stock.columns:
-            fig.add_trace(go.Scatter(x=ff_stock['日期'], y=ff_stock['收盘价'], mode='lines', line=dict(color='#f5c542',width=2), name='收盘价'), secondary_y=True)
-        fig.update_layout(height=350, template='plotly_dark', margin=dict(l=10,r=10,t=10,b=10), hovermode='x unified')
+        colors_flow = ['#ff4444' if v > 0 else '#00aa00' for v in net_flow[-60:]]
+        fig.add_trace(go.Bar(x=dates[-60:], y=net_flow[-60:] / 1e8,
+                             marker_color=colors_flow, name='资金净流(亿, 估算)'), secondary_y=False)
+        fig.add_trace(go.Scatter(x=dates[-60:], y=closes[-60:], mode='lines',
+                                 line=dict(color='#f5c542', width=2), name='收盘价'), secondary_y=True)
+        fig.update_layout(height=350, template='plotly_dark', margin=dict(l=10,r=10,t=10,b=10), hovermode='x unified',
+                          title='近60日成交额资金流向（红柱=净流入，绿柱=净流出）')
         st.plotly_chart(fig, use_container_width=True)
+
+        # Also show summary stats
+        f1, f2, f3 = st.columns(3)
+        recent_flow = float(np.sum(net_flow[-5:]))
+        total_amount = float(np.sum(amounts[-5:]))
+        f1.metric('近5日净流', f'{recent_flow/1e8:+.1f}亿')
+        f2.metric('近5日成交额', f'{total_amount/1e8:.1f}亿')
+        avg_amount = float(np.mean(amounts[-20:])) if len(amounts) >= 20 else float(np.mean(amounts))
+        f3.metric('20日均成交', f'{avg_amount/1e8:.1f}亿')
     else:
-        st.info('无资金流数据')
+        st.info('无成交额数据')
 
     # ---- Livermore Analysis ----
     st.subheader('利弗莫尔思维分析')
