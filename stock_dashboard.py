@@ -681,26 +681,21 @@ def render_tab_overview(analyzer, today_str):
     else:
         st.warning('今日无涨停数据')
 
-    st.subheader('市场广度')
-    ind_df = StockAnalyzer.fetch_industry_board()
-    if not ind_df.empty:
-        up_col = None; dn_col = None
-        for col in ind_df.columns:
-            if '上涨' in str(col): up_col = col
-            if '下跌' in str(col): dn_col = col
-        if up_col and dn_col:
-            up = ind_df[up_col].sum()
-            dn = ind_df[dn_col].sum()
-            total = up + dn
-            if total > 0:
-                breadth = round(up / total, 3)
-                st.progress(breadth, text=f'涨跌比: {breadth:.2f} (涨{(breadth*100):.0f}%/跌{((1-breadth)*100):.0f}%)')
-            else:
-                st.info('暂无涨跌数据')
-        else:
-            st.info(f'行业板块列名不匹配，当前列: {list(ind_df.columns)[:8]}')
+    st.subheader('市场统计')
+    if not limit_df.empty:
+        ms1, ms2, ms3, ms4 = st.columns(4)
+        avg_fb = limit_df['封板资金'].mean() if '封板资金' in limit_df.columns else 0
+        avg_hsl = limit_df['换手率'].mean() if '换手率' in limit_df.columns else 0
+        zhaban = int(limit_df['炸板次数'].fillna(0).astype(int).gt(0).sum()) if '炸板次数' in limit_df.columns else 0
+        zhaban_rate = round(zhaban / num * 100, 1) if num > 0 else 0
+        ms1.metric('炸板率', f'{zhaban_rate}%', f'{zhaban}只')
+        ms2.metric('平均封板资金', f'{avg_fb/1e8:.2f}亿' if avg_fb > 0 else '-')
+        ms3.metric('平均换手率', f'{avg_hsl:.1f}%' if avg_hsl > 0 else '-')
+        max_lb = int(limit_df['连板数'].max()) if '连板数' in limit_df.columns else 0
+        lb_count = int((limit_df['连板数'].fillna(0).astype(int) >= 2).sum()) if '连板数' in limit_df.columns else 0
+        ms4.metric('连板≥2', f'{lb_count}只', f'最高{max_lb}板')
     else:
-        st.info('暂无行业板块数据')
+        st.info('暂无涨停数据')
 
 
 # ============================================================
