@@ -1607,6 +1607,54 @@ def render_tab_sectors(analyzer, today_str):
         fig.update_layout(height=420, template='plotly_dark', xaxis_title='涨停数量', yaxis=dict(autorange='reversed'))
         st.plotly_chart(fig, use_container_width=True)
 
+    # ---- 重点关注概念板块 ----
+    st.divider()
+    st.subheader('重点概念板块追踪')
+    WATCH_CONCEPTS = [
+        '商业航天', 'PCB概念', 'PCB', '存储芯片', '共封装光学', 'CPO', '创新药',
+        '算力租赁', '钠离子电池', '光纤概念', 'AI应用', '人工智能', '先进封装',
+        '人形机器人', '机器人概念', '机器人', '绿色电力', '数据中心', 'AIDC',
+        '储能', '人工智能芯片', 'AI芯片', '半导体', '白酒概念', '白酒',
+        '房地产', '新能源汽车', '新能源车', '消费概念', '大消费'
+    ]
+    all_sectors = limit_df['所属行业'].value_counts() if not limit_df.empty and '所属行业' in limit_df.columns else pd.Series(dtype=int)
+
+    found = []
+    not_found = []
+    for concept in WATCH_CONCEPTS:
+        matched = False
+        for sector_name, count in all_sectors.items():
+            if concept in str(sector_name) or str(sector_name) in concept:
+                if not any(f['板块'] == sector_name for f in found):
+                    found.append({'板块': sector_name, '涨停数': count, '匹配词': concept})
+                matched = True
+                break
+        if not matched and concept not in not_found:
+            not_found.append(concept)
+
+    if found:
+        # Show as metric cards
+        cols = st.columns(min(6, len(found)))
+        for i, item in enumerate(sorted(found, key=lambda x: x['涨停数'], reverse=True)[:20]):
+            with cols[i % 6]:
+                heat = '🔥' if item['涨停数'] >= 8 else ('📈' if item['涨停数'] >= 4 else ('➡️' if item['涨停数'] >= 2 else '❄️'))
+                st.metric(f"{heat} {item['板块']}", f"{item['涨停数']}只")
+
+        # Table with details
+        with st.expander('概念详情'):
+            detail_data = []
+            for item in sorted(found, key=lambda x: x['涨停数'], reverse=True):
+                status = '主线' if item['涨停数'] >= 8 else ('热门' if item['涨停数'] >= 4 else ('活跃' if item['涨停数'] >= 2 else '冷淡'))
+                detail_data.append({**item, '状态': status})
+            st.dataframe(pd.DataFrame(detail_data), use_container_width=True, hide_index=True)
+
+    if not_found:
+        unique_not_found = list(set(not_found))[:10]
+        st.caption(f'今日无涨停: {", ".join(unique_not_found)}')
+    else:
+        st.caption('今日无涨停: 全部重点概念均有涨停')
+    st.caption('注：部分概念名称可能以"概念"后缀或简称出现，系统已做模糊匹配')
+
 
 # ============================================================
 # Tab 3: Stock Analysis (K-line + 3D Score)
