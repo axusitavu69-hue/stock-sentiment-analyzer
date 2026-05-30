@@ -674,32 +674,33 @@ def render_tab_overview(analyzer, today_str):
     with c3: st.markdown(f"""<div class="metric-card orange"><div class="metric-value">{high}</div><div class="metric-label">最高连板</div></div>""", unsafe_allow_html=True)
     with c4: st.markdown(f"""<div class="metric-card purple"><div class="metric-value" style="font-size:30px">{signal_str}</div><div class="metric-label">市场信号</div></div>""", unsafe_allow_html=True)
     st.divider()
-    cl, cr = st.columns([3, 2])
-    with cl:
-        st.subheader('涨停板明细')
-        if not limit_df.empty:
-            sc = [c for c in ['代码','名称','涨停时间','连板数','封板资金','换手率','所属行业','炸板次数'] if c in limit_df.columns]
-            st.dataframe(limit_df[sc].head(100), use_container_width=True, hide_index=True, height=460)
-        else: st.warning('今日无涨停数据')
-    with cr:
-        st.subheader('概念资金流 TOP15')
-        ff_df = StockAnalyzer.fetch_concept_fund_flow("即时")
-        if not ff_df.empty and '净额' in ff_df.columns:
-            import plotly.graph_objects as go
-            top15 = ff_df.nlargest(15, '净额').copy()
-            top15['净额亿'] = (top15['净额']/1e8).round(1)
-            fig = go.Figure(go.Bar(x=top15['净额亿'], y=top15['行业'], orientation='h',
-                marker=dict(color=['#ff4444' if v>0 else '#00aa00' for v in top15['净额亿']]),
-                text=top15['净额亿'], textposition='outside'))
-            fig.update_layout(height=460, template='plotly_dark', margin=dict(l=10,r=30,t=10,b=10),
-                              yaxis=dict(autorange='reversed'))
-            st.plotly_chart(fig, use_container_width=True)
-        else: st.warning('资金流数据暂不可用')
+    st.subheader('今日涨停板明细')
+    if not limit_df.empty:
+        sc = [c for c in ['代码','名称','涨停时间','连板数','封板资金','换手率','所属行业','炸板次数'] if c in limit_df.columns]
+        st.dataframe(limit_df[sc].head(100), use_container_width=True, hide_index=True, height=460)
+    else:
+        st.warning('今日无涨停数据')
+
     st.subheader('市场广度')
     ind_df = StockAnalyzer.fetch_industry_board()
     if not ind_df.empty:
-        breadth = analyzer.compute_market_breadth(ind_df)
-        st.progress(breadth, text=f'涨跌比: {breadth:.2f} (涨{(breadth*100):.0f}%/跌{((1-breadth)*100):.0f}%)')
+        up_col = None; dn_col = None
+        for col in ind_df.columns:
+            if '上涨' in str(col): up_col = col
+            if '下跌' in str(col): dn_col = col
+        if up_col and dn_col:
+            up = ind_df[up_col].sum()
+            dn = ind_df[dn_col].sum()
+            total = up + dn
+            if total > 0:
+                breadth = round(up / total, 3)
+                st.progress(breadth, text=f'涨跌比: {breadth:.2f} (涨{(breadth*100):.0f}%/跌{((1-breadth)*100):.0f}%)')
+            else:
+                st.info('暂无涨跌数据')
+        else:
+            st.info(f'行业板块列名不匹配，当前列: {list(ind_df.columns)[:8]}')
+    else:
+        st.info('暂无行业板块数据')
 
 
 # ============================================================
