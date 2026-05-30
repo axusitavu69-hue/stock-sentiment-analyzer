@@ -1373,27 +1373,15 @@ def render_tab_stocks(analyzer, today_str):
         import plotly.graph_objects as go
         from plotly.subplots import make_subplots
 
-        # Derive fund flow from amount data (成交额)
         hist_df_sorted = hist_df.sort_values('date')
         amounts = np.array(hist_df_sorted['amount'].values, dtype=float).flatten()
         closes = np.array(hist_df_sorted['close'].values, dtype=float).flatten()
         dates = pd.to_datetime(hist_df_sorted['date'].values)
 
-        # Net inflow proxy: positive if price went up (buying pressure), negative if down
         price_chg = np.diff(closes, prepend=closes[0])
-        net_flow = np.where(price_chg > 0, amounts, -amounts * 0.3)  # approximate
+        net_flow = np.where(price_chg > 0, amounts, -amounts * 0.3)
 
-        fig = make_subplots(specs=[[{'secondary_y': True}]])
-        colors_flow = ['#ff4444' if v > 0 else '#00aa00' for v in net_flow[-60:]]
-        fig.add_trace(go.Bar(x=dates[-60:], y=net_flow[-60:] / 1e8,
-                             marker_color=colors_flow, name='资金净流(亿, 估算)'), secondary_y=False)
-        fig.add_trace(go.Scatter(x=dates[-60:], y=closes[-60:], mode='lines',
-                                 line=dict(color='#f5c542', width=2), name='收盘价'), secondary_y=True)
-        fig.update_layout(height=350, template='plotly_dark', margin=dict(l=10,r=10,t=10,b=10), hovermode='x unified',
-                          title='近60日成交额资金流向（红柱=净流入，绿柱=净流出）')
-        st.plotly_chart(fig, use_container_width=True)
-
-        # Also show summary stats
+        # Summary stats above the chart
         f1, f2, f3 = st.columns(3)
         recent_flow = float(np.sum(net_flow[-5:]))
         total_amount = float(np.sum(amounts[-5:]))
@@ -1401,6 +1389,30 @@ def render_tab_stocks(analyzer, today_str):
         f2.metric('近5日成交额', f'{total_amount/1e8:.1f}亿')
         avg_amount = float(np.mean(amounts[-20:])) if len(amounts) >= 20 else float(np.mean(amounts))
         f3.metric('20日均成交', f'{avg_amount/1e8:.1f}亿')
+
+        # Clean chart below
+        fig = make_subplots(specs=[[{'secondary_y': True}]])
+        colors_flow = ['#ff4444' if v > 0 else '#00aa00' for v in net_flow[-60:]]
+        fig.add_trace(go.Bar(
+            x=dates[-60:], y=net_flow[-60:] / 1e8,
+            marker_color=colors_flow, name='资金流(亿)',
+            marker_line_width=0, opacity=0.85
+        ), secondary_y=False)
+        fig.add_trace(go.Scatter(
+            x=dates[-60:], y=closes[-60:], mode='lines',
+            line=dict(color='#f5c542', width=2.5), name='收盘价'
+        ), secondary_y=True)
+        fig.update_layout(
+            height=320, template='plotly_dark',
+            margin=dict(l=30, r=30, t=5, b=5),
+            hovermode='x unified',
+            showlegend=True,
+            legend=dict(orientation='h', yanchor='bottom', y=1.02, xanchor='left', x=0, font_size=10)
+        )
+        fig.update_yaxes(title_text='', secondary_y=False, showgrid=False)
+        fig.update_yaxes(title_text='', secondary_y=True, showgrid=False)
+        fig.update_xaxes(showgrid=False)
+        st.plotly_chart(fig, use_container_width=True)
     else:
         st.info('无成交额数据')
 
