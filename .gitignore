@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+stock_reports/
+.DS_Store
+*.xlsx
+*.png
+*.json
+/tmp/
