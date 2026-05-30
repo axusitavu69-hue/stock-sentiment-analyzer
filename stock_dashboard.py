@@ -773,83 +773,131 @@ class StockAnalyzer:
         code_clean = str(stock_code).strip()
         lhb_df = StockAnalyzer.fetch_lhb_data(self.today_str)
 
-        if lhb_df.empty:
-            return None  # Not on LHB or no data
+        if lhb_df is None or lhb_df.empty:
+            return None
 
-        # Try to find this stock in LHB data
-        # Columns might be '代码', '股票代码', '名称', etc
-        code_col = None
+        # Robust column detection
+        code_col = name_col = reason_col = None
         for c in lhb_df.columns:
-            if '代码' in str(c) or 'code' in str(c).lower():
-                code_col = c; break
+            cs = str(c)
+            if '代码' in cs: code_col = c
+            if '名称' in cs: name_col = c
+            if '原因' in cs or '解读' in cs: reason_col = c
+
+        if code_col is None:
+            # try to detect by position or pattern
+            for c in lhb_df.columns:
+                try:
+                    sample = str(lhb_df[c].iloc[0])
+                    if sample.isdigit() and len(sample) == 6:
+                        code_col = c; break
+                except: pass
+
         if code_col is None:
             return None
 
-        lhb_df[code_col] = lhb_df[code_col].astype(str).str.strip()
-        match = lhb_df[lhb_df[code_col] == code_clean]
+        lhb_df[code_col] = lhb_df[code_col].astype(str).str.zfill(6).str.strip()
+        match = lhb_df[lhb_df[code_col] == code_clean.zfill(6)]
         if match.empty:
             return None
 
-        # Analyze buy and sell seats
-        buy_seats = []; sell_seats = []
-        for _, r in match.iterrows():
-            reason = str(r.get('解读', r.get('上榜原因', '')))
-            for prefix in ['买方营业部', '买入营业部', '买方席位']:
-                for i in range(1, 6):
-                    col = f'{prefix}{i}'
-                    if col in match.columns:
-                        val = str(r.get(col, ''))
-                        if val and val != 'nan':
-                            buy_seats.append(val)
-            for prefix in ['卖方营业部', '卖出营业部', '卖方席位']:
-                for i in range(1, 6):
-                    col = f'{prefix}{i}'
-                    if col in match.columns:
-                        val = str(r.get(col, ''))
-                        if val and val != 'nan':
-                            sell_seats.append(val)
+        row_data = match.iloc[0]
+        reason = str(row_data.get(reason_col, '')) if reason_col else ''
+
+        # Find buy seat columns: patterns like 买一席位, 买方营业部1, 买方1, 买1席位, etc.
+        buy_cols = []
+        sell_cols = []
+        for c in lhb_df.columns:
+            cs = str(c)
+            if ('买' in cs and ('席位' in cs or '营业部' in cs or '机构' in cs)) or \
+               ('买' in cs and any(str(i) in cs for i in range(1, 11))):
+                buy_cols.append(c)
+            if ('卖' in cs and ('席位' in cs or '营业部' in cs or '机构' in cs)) or \
+               ('卖' in cs and any(str(i) in cs for i in range(1, 11))):
+                sell_cols.append(c)
+
+        buy_seats = []
+        for c in buy_cols[:5]:
+            val = str(row_data.get(c, ''))
+            if val and val != 'nan' and val.strip():
+                buy_seats.append(val.strip())
+
+        sell_seats = []
+        for c in sell_cols[:5]:
+            val = str(row_data.get(c, ''))
+            if val and val != 'nan' and val.strip():
+                sell_seats.append(val.strip())
+
+        # If no seat columns found, try fuzzy matching for any column containing seat-like info
+        if not buy_seats and not sell_seats:
+            for c in lhb_df.columns:
+                cs = str(c)
+                val = str(row_data.get(c, ''))
+                if '席位' in cs and '买' in cs and val not in ('', 'nan'):
+                    buy_seats.append(val.strip())
+                if '席位' in cs and '卖' in cs and val not in ('', 'nan'):
+                    sell_seats.append(val.strip())
 
         # Classify seats
         def classify_seat(name):
             for known, info in StockAnalyzer.SEAT_KNOWN.items():
                 if known in name:
                     return info
-            return {'type': '未知席位', 'style': '未记录，需观察',
-                    'hold_prob': 50, 'risk': '未知', 'desc': '没有历史记录的席位，风格未知。'}
+            # Try partial match
+            for known, info in StockAnalyzer.SEAT_KNOWN.items():
+                if any(part in name for part in known.split() if len(part) >= 2):
+                    return info
+            return {'type': '未知', 'style': '无历史记录',
+                    'hold_prob': 50, 'risk': '中', 'desc': '未记录席位。'}
 
         buy_analysis = []
-        for s in buy_seats[:5]:
+        for s in buy_seats:
             info = classify_seat(s)
-            buy_analysis.append({'席位': s, **info})
+            buy_analysis.append({'席位': s[:30], **info})
 
         sell_analysis = []
-        for s in sell_seats[:5]:
+        for s in sell_seats:
             info = classify_seat(s)
-            sell_analysis.append({'席位': s, **info})
+            sell_analysis.append({'席位': s[:30], **info})
 
-        # Overall risk assessment
-        all_buy_risk = [a['risk'] for a in buy_analysis]
-        all_sell_risk = [a['risk'] for a in sell_analysis]
-        has_seller = any(r == '砸盘型' for r in [a['type'] for a in buy_analysis])
-        has_locker = any(r == '锁仓型' for r in [a['type'] for a in buy_analysis])
+        # Risk assessment
+        has_dumper = any(a['type'] == '砸盘型' for a in buy_analysis)
+        has_quant = any(a['type'] == '量化型' for a in buy_analysis)
+        has_locker = any(a['type'] == '锁仓型' for a in buy_analysis)
+        has_inst = any(a['type'] in ('机构', '外资') for a in buy_analysis)
 
-        if has_seller:
+        if has_dumper or has_quant:
             risk_verdict = '高位警惕'
-            risk_detail = '买方中有知名砸盘席位——次日大概率高开后出货。CIS会说"先跑为敬"，利弗莫尔会说"异常行为就是离场信号"。'
-        elif '高' in str(all_buy_risk):
+            risk_detail = '买方中有砸盘/量化席位——次日大概率出货。CIS："先跑为敬"。'
+        elif '高' in str([a['risk'] for a in buy_analysis]):
             risk_verdict = '谨慎持有'
-            risk_detail = '买方席位中有高风险风格——建议次日早盘减仓，观察资金承接力度。'
-        elif has_locker:
+            risk_detail = '买方中有高风险席位——建议次日早盘减仓观察。'
+        elif has_locker or has_inst:
             risk_verdict = '乐观看多'
-            risk_detail = '买方以锁仓型席位为主——锁仓游资有格局，不会次日立即砸盘。'
-        else:
+            risk_detail = '买方以锁仓/机构为主——有格局，不会次日砸盘。'
+        elif buy_seats:
             risk_verdict = '中性观察'
-            risk_detail = '席位结构中性，无极端信号，按正常节奏交易即可。'
+            risk_detail = '席位结构中性，无极端信号。'
+        else:
+            risk_verdict = '数据不足'
+            risk_detail = '无法解析席位信息，请查看原始龙虎榜数据。'
+
+        # Also add buy/sell amount info if available
+        buy_amount = sell_amount = None
+        for c in lhb_df.columns:
+            cs = str(c)
+            if '买方成交' in cs or '买入金额' in cs:
+                try: buy_amount = float(row_data.get(c, 0))
+                except: pass
+            if '卖方成交' in cs or '卖出金额' in cs:
+                try: sell_amount = float(row_data.get(c, 0))
+                except: pass
 
         return {
             'on_lhb': True, 'buy_seats': buy_analysis, 'sell_seats': sell_analysis,
             'risk_verdict': risk_verdict, 'risk_detail': risk_detail,
-            'buy_count': len(buy_seats), 'sell_count': len(sell_seats)
+            'buy_count': len(buy_seats), 'sell_count': len(sell_seats),
+            'buy_amount': buy_amount, 'sell_amount': sell_amount, 'reason': reason
         }
 
     # ==================== Per-Stock Sector + Prediction ====================
