@@ -309,6 +309,214 @@ class StockAnalyzer:
             })
         return pd.DataFrame(results).sort_values('盘面质量评分', ascending=False).reset_index(drop=True)
 
+    # ==================== Livermore Analysis ====================
+
+    def compute_livermore_analysis(self, row, hist_df, market_sentiment_score):
+        """利弗莫尔思维选股分析
+        五大原则:
+        1. 关键点突破 - 封板是否构成真正的突破信号
+        2. 趋势跟随 - 股价趋势方向与强度
+        3. 量价配合 - 成交量确认价格行为
+        4. 领涨股识别 - 该股在市场中是否属于领导者
+        5. 市场环境 - 整体情绪是否配合
+        """
+        ft = self.parse_fengban_time(row.get('首次封板时间', 150000))
+        zc = int(row.get('炸板次数', 0) or 0)
+        fb = row.get('封板资金', 0) or 0
+        hsl = row.get('换手率', 0) or 0
+        lb = int(row.get('连板数', 1) or 1)
+        code = str(row.get('代码', ''))
+        name = row.get('名称', '')
+
+        score = 0
+        analysis = []
+
+        # ---- 原则1: 关键点突破 (0-20分) ----
+        pv_score = 0
+        if not hist_df.empty and len(hist_df) >= 20:
+            close_arr = hist_df['close'].values.astype(float)
+            ma20 = pd.Series(close_arr).rolling(20).mean().values[-1]
+            last_close = close_arr[-1]
+            prev_high_20 = pd.Series(hist_df['high'].values[:-1]).rolling(20).max().values[-1] if len(hist_df) > 20 else ma20
+
+            if ft <= 92500:
+                pv_score += 8
+                analysis.append('集合竞价封板，关键点突破力度极强——利弗莫尔会视此为决定性突破信号')
+            elif ft <= 93500:
+                pv_score += 6
+                analysis.append('早盘秒板，主力攻击意愿明确，关键点突破有效')
+            elif ft <= 100000:
+                pv_score += 4
+                analysis.append('早盘封板，突破确认但不够强势，需观察后续')
+            else:
+                pv_score += 1
+                analysis.append('封板时间偏晚，利弗莫尔不会在尾盘追涨——"不要追逐市场"')
+
+            if zc == 0:
+                pv_score += 7
+                analysis.append('盘中无炸板，封单坚定——"股票表现正如你所料"')
+            elif zc == 1:
+                pv_score += 3
+                analysis.append('炸板1次后回封，支撑存在但不够稳固')
+            else:
+                pv_score += 0
+                analysis.append(f'炸板{zc}次——利弗莫尔会立即退出："如果你的股票表现异常，不要问为什么，走！"')
+
+            if lb >= 3:
+                pv_score += 5
+                analysis.append(f'{lb}连板延续中——"正在上涨的股票往往继续上涨"')
+            elif lb == 2:
+                pv_score += 3
+        else:
+            pv_score += 5
+
+        score += min(20, pv_score)
+
+        # ---- 原则2: 趋势跟随 (0-20分) ----
+        trend_score = 0
+        if not hist_df.empty and len(hist_df) >= 20:
+            close_arr = hist_df['close'].values.astype(float)
+            ma5 = pd.Series(close_arr).rolling(5).mean()
+            ma20 = pd.Series(close_arr).rolling(20).mean()
+            if ma5.values[-1] > ma20.values[-1] and ma5.values[-2] > ma20.values[-2]:
+                trend_score += 10
+                analysis.append('多头排列，趋势向上——"永远不要与趋势为敌"')
+            elif close_arr[-1] > ma20.values[-1]:
+                trend_score += 6
+                analysis.append('股价站上20日均线，趋势偏多')
+            else:
+                trend_score += 2
+                analysis.append('股价低于20日均线，逆趋势涨停——利弗莫尔会保持谨慎')
+
+            # Check trend strength
+            if len(close_arr) >= 30:
+                month_ago = close_arr[-20]
+                if close_arr[-1] > month_ago * 1.1:
+                    trend_score += 5
+                    analysis.append('近一个月涨幅超过10%，动量充足')
+                elif close_arr[-1] > month_ago:
+                    trend_score += 3
+
+            # Breakout vs MA
+            if last_close > ma20 * 1.05:
+                trend_score += 5
+                analysis.append('股价脱离均线大幅上攻——突破关键阻力位')
+        else:
+            trend_score += 8
+        score += min(20, trend_score)
+
+        # ---- 原则3: 量价配合 (0-20分) ----
+        vol_score = 0
+        if not hist_df.empty and len(hist_df) >= 5:
+            vol_arr = hist_df['volume'].values.astype(float)
+            avg_vol_5 = pd.Series(vol_arr[-6:-1]).mean() if len(vol_arr) > 5 else vol_arr[:-1].mean()
+            today_vol = vol_arr[-1]
+            if today_vol > avg_vol_5 * 2:
+                vol_score += 8
+                analysis.append('成交量爆发（>2倍均量）——"成交量不会骗人"，大资金正在行动')
+            elif today_vol > avg_vol_5 * 1.3:
+                vol_score += 5
+                analysis.append('成交量温和放大，配合涨势')
+            else:
+                vol_score += 2
+
+            if hsl is not None and 3 <= hsl <= 15:
+                vol_score += 7
+                analysis.append(f'换手率{hsl}%处于健康区间——筹码交换充分，有利于后续上涨')
+            elif hsl is not None and 0 < hsl < 3:
+                vol_score += 4
+                analysis.append('换手率偏低，筹码锁定较好但流动性不足')
+            elif hsl is not None and hsl > 20:
+                vol_score += 2
+                analysis.append('换手率过高——利弗莫尔会警惕："过度的活跃往往预示着顶部"')
+
+            if fb > 5e8:
+                vol_score += 5
+            elif fb > 1e8:
+                vol_score += 3
+        else:
+            vol_score += 10
+        score += min(20, vol_score)
+
+        # ---- 原则4: 领涨股识别 (0-20分) ----
+        leader_score = 0
+        if lb >= 4:
+            leader_score += 10
+            analysis.append(f'{lb}连板领涨股——"永远买最强的股票，不要买便宜的垃圾"')
+        elif lb >= 2:
+            leader_score += 6
+            analysis.append(f'{lb}连板，处于市场前排')
+
+        sector = row.get('所属行业', '')
+        if sector:
+            leader_score += 5
+            analysis.append(f'所属「{sector}」板块——"板块中的领涨股往往是最安全的"')
+
+        if fb > 1e9:
+            leader_score += 5
+            analysis.append('封单超过10亿，主力资金高度认可')
+        elif fb > 3e8:
+            leader_score += 3
+
+        score += min(20, leader_score)
+
+        # ---- 原则5: 市场环境 (0-20分) ----
+        env_score = 0
+        if market_sentiment_score >= 80:
+            env_score += 10
+            analysis.append('市场情绪强劲（>80分）——"在牛市中，每个人都能赚钱"')
+        elif market_sentiment_score >= 60:
+            env_score += 7
+            analysis.append('市场情绪温和，环境适合交易')
+        elif market_sentiment_score >= 40:
+            env_score += 4
+            analysis.append('市场情绪偏弱，利弗莫尔会建议减仓观望')
+        else:
+            env_score += 1
+            analysis.append('市场情绪低迷——"不在没有趋势的市场中交易"')
+
+        if zc == 0:
+            env_score += 5
+            analysis.append('市场环境良好，资金信心充足')
+        elif zc > 2:
+            env_score += 0
+            analysis.append('多次炸板反映市场整体脆弱')
+
+        if lb >= 3 and market_sentiment_score >= 60:
+            env_score += 5
+            analysis.append('牛市+连板股——利弗莫尔最喜欢的组合：趋势确认后的加仓机会')
+
+        score += min(20, env_score)
+
+        # ---- 综合判定 ----
+        if score >= 80:
+            verdict = '强烈推荐'
+            verdict_detail = '该股完美符合利弗莫尔的核心法则：关键点突破有力、趋势向上、量价配合、属于领涨股、市场环境配合。这是利弗莫尔会"金字塔加仓"的标的。'
+        elif score >= 65:
+            verdict = '推荐关注'
+            verdict_detail = '符合利弗莫尔大部分选股标准，但个别维度有瑕疵。可小仓位试探，若次日延续强势再行加仓。'
+        elif score >= 50:
+            verdict = '谨慎观察'
+            verdict_detail = '部分符合利弗莫尔法则，但存在明显短板。利弗莫尔会将其放入观察名单："等待股票自己证明自己"。'
+        elif score >= 35:
+            verdict = '不推荐'
+            verdict_detail = '多个维度不符合利弗莫尔选股标准。利弗莫尔会认为"这不是我想要的交易"。'
+        else:
+            verdict = '强烈回避'
+            verdict_detail = '该股几乎完全不符合利弗莫尔法则。记住利弗莫尔最重要的一句话："保住本金，等待真正的机会"。'
+
+        return {
+            'score': score,
+            'pivotal': pv_score,
+            'trend': trend_score,
+            'volume': vol_score,
+            'leader': leader_score,
+            'environment': env_score,
+            'verdict': verdict,
+            'verdict_detail': verdict_detail,
+            'analysis': analysis
+        }
+
     # ==================== Market Breadth ====================
 
     def compute_market_breadth(self, industry_df):
@@ -760,6 +968,7 @@ def render_tab_stocks(analyzer, today_str):
     if limit_df.empty:
         st.warning('今日无涨停数据')
         return
+    num = len(limit_df)
 
     # ---- Phase 1: Lightweight - show stock list immediately ----
     stock_options = []
@@ -875,6 +1084,47 @@ def render_tab_stocks(analyzer, today_str):
         st.plotly_chart(fig, use_container_width=True)
     else:
         st.info('无资金流数据')
+
+    # ---- Livermore Analysis ----
+    st.subheader('利弗莫尔思维分析')
+    market_score = min(100, int(num * 2.5 + int(limit_df['连板数'].max() if not limit_df.empty and '连板数' in limit_df.columns else 0) * 10))
+    livermore = analyzer.compute_livermore_analysis(row, hist_df, market_score)
+
+    # Score card
+    lc = '#38ef7d' if livermore['score'] >= 80 else ('#4facfe' if livermore['score'] >= 60 else ('#f5c542' if livermore['score'] >= 40 else '#f5576c'))
+    st.markdown(f"""
+    <div style="background:linear-gradient(135deg,#1a1a2e,#16213e); border-radius:16px; padding:20px; margin:12px 0;
+                border:2px solid {lc};">
+        <div style="display:flex; justify-content:space-around; align-items:center; flex-wrap:wrap;">
+            <div style="text-align:center;">
+                <div style="font-size:12px; color:#888;">利弗莫尔评分</div>
+                <div style="font-size:56px; font-weight:800; color:{lc};">{livermore['score']}</div>
+                <div style="font-size:14px; color:#aaa;">/ 100</div>
+            </div>
+            <div style="text-align:center;">
+                <div style="font-size:20px; font-weight:700; color:{lc};">{livermore['verdict']}</div>
+                <div style="font-size:13px; color:#ccc; max-width:400px; margin-top:8px; line-height:1.5;">{livermore['verdict_detail']}</div>
+            </div>
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    # Five principle breakdown
+    lc1, lc2, lc3, lc4, lc5 = st.columns(5)
+    with lc1: st.metric('关键点突破', f'{livermore["pivotal"]}/20')
+    with lc2: st.metric('趋势跟随', f'{livermore["trend"]}/20')
+    with lc3: st.metric('量价配合', f'{livermore["volume"]}/20')
+    with lc4: st.metric('领涨股', f'{livermore["leader"]}/20')
+    with lc5: st.metric('市场环境', f'{livermore["environment"]}/20')
+
+    # Detailed analysis points
+    with st.expander('利弗莫尔语录解读'):
+        for line in livermore['analysis']:
+            st.markdown(f'- {line}')
+        st.divider()
+        st.caption('"投机不是赌博，而是对未来的周密计算。市场永远不会错，但你的观点常常是错的。" ——杰西·利弗莫尔')
+
+    st.divider()
 
     # ---- Fast quality ranking table (no K-line calls) ----
     st.subheader('涨停股快评排名')
