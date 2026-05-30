@@ -902,6 +902,168 @@ class StockAnalyzer:
 
     # ==================== Per-Stock Sector + Prediction ====================
 
+    def compute_psychology(self, row, hist_df, livermore, cis, lhb, market_score):
+        """交易心理学综合诊断"""
+        try:
+            return self._psych_impl(row, hist_df, livermore, cis, lhb, market_score)
+        except:
+            return None
+
+    def _psych_impl(self, row, hist_df, livermore, cis, lhb, market_score):
+        ft = self.parse_fengban_time(row.get('首次封板时间', 150000))
+        zc = int(row.get('炸板次数', 0) or 0)
+        fb = row.get('封板资金', 0) or 0
+        hsl = row.get('换手率', 0) or 0
+        lb = max(1, int(row.get('连板数', 1) or 1))
+        code = str(row.get('代码', ''))
+        name = str(row.get('名称', ''))
+
+        market_psych = []
+        discipline = []
+
+        # ---- Infer market psychology ----
+        # 1. Greed/Fear balance from封板时间
+        if ft <= 92500:
+            market_psych.append({
+                'emotion': 'greed',
+                'label': '极度贪婪',
+                'analysis': '集合竞价封板——资金抢筹意愿达到顶峰。市场处于"害怕错过(FOMO)"状态，但极端的贪婪往往预示着接近顶部。利弗莫尔："当所有人都看多时，要小心。"'
+            })
+        elif ft <= 93500:
+            market_psych.append({
+                'emotion': 'greed',
+                'label': '贪婪主导',
+                'analysis': '开盘秒板——多方情绪高涨，空方无力抵抗。贪婪是当前的主导情绪，追涨资金源源不断。'
+            })
+        elif ft <= 100000:
+            market_psych.append({
+                'emotion': 'fomo',
+                'label': 'FOMO（害怕错过）',
+                'analysis': '早盘封板——资金在开盘后逐步形成共识。典型的FOMO心理：犹豫→确认→追涨。'
+            })
+        else:
+            market_psych.append({
+                'emotion': 'hope',
+                'label': '希望驱动',
+                'analysis': '尾盘封板——弱势涨停，买入者更多是"希望明天还能涨"而非确信。交易心理学中，"希望"是最危险的情绪。'
+            })
+
+        # 2. Fear analysis from炸板
+        if zc >= 2:
+            market_psych.append({
+                'emotion': 'fear',
+                'label': '恐惧释放',
+                'analysis': f'炸板{zc}次——盘中出现恐慌性抛售。每次炸板都是"持有者恐惧→卖出→价格下跌→更多恐惧"的负反馈循环。CIS："恐惧是会传染的"。'
+            })
+        elif zc == 1:
+            market_psych.append({
+                'emotion': 'calm',
+                'label': '短暂动摇',
+                'analysis': '炸板1次后回封——空方试探性攻击被多方击退。短暂的恐惧被贪婪压制，但裂痕已经出现。'
+            })
+        else:
+            market_psych.append({
+                'emotion': 'calm',
+                'label': '信心稳固',
+                'analysis': '零炸板——全天封单纹丝不动。持有者信心极度稳固，卖方力量几乎为零。但CIS提醒："所有人都赚钱时，要问谁在亏钱？"'
+            })
+
+        # 3. Crowd psychology from换手率
+        if hsl is not None:
+            if hsl > 25:
+                market_psych.append({
+                    'emotion': 'fear',
+                    'label': '筹码松动',
+                    'analysis': f'换手率{hsl}%过高——大量筹码在一天内易手。说明老资金在出货、新资金在接盘。群体在"追逐利润"和"落袋为安"之间激烈博弈。'
+                })
+            elif 3 <= hsl <= 15:
+                market_psych.append({
+                    'emotion': 'calm',
+                    'label': '筹码健康',
+                    'analysis': f'换手率{hsl}%适中——筹码交换有序。买方和卖方都保持理性，没有恐慌性抛售也没有非理性抢筹。'
+                })
+            elif hsl < 3:
+                market_psych.append({
+                    'emotion': 'greed',
+                    'label': '筹码锁定',
+                    'analysis': f'换手率{hsl}%极低——持有者集体锁仓。这是极度看多的信号，但也意味着一旦开板，累积的抛压会集中释放。'
+                })
+
+        # 4. Institutional psychology from LHB
+        if lhb:
+            has_dumper = any('砸盘' in str(a.get('type', '')) for a in lhb.get('buy_seats', []))
+            has_inst = any(a.get('type', '') in ('机构', '外资') for a in lhb.get('buy_seats', []))
+            if has_dumper:
+                market_psych.append({
+                    'emotion': 'fear',
+                    'label': '游资心理：收割模式',
+                    'analysis': '买方中有知名砸盘席位——游资的心理是"先手收割后手"。他们今天买入不是为了持有，而是为了明天卖给跟风的人。这是零和博弈思维。'
+                })
+            elif has_inst:
+                market_psych.append({
+                    'emotion': 'calm',
+                    'label': '机构心理：价值布局',
+                    'analysis': '机构席位主导——机构资金的心理是"长期价值"。他们不追求次日收益，而是布局一个季度的行情。'
+                })
+            else:
+                market_psych.append({
+                    'emotion': 'calm',
+                    'label': '资金博弈：多空均衡',
+                    'analysis': '席位结构中性——买方和卖方力量趋于平衡。市场处于"等待新信息"的状态。'
+                })
+
+        # 5. Self-reflection
+        lbs = lb
+        if lbs >= 5:
+            market_psych.append({
+                'emotion': 'fomo',
+                'label': '追高风险',
+                'analysis': f'{lbs}连板——"已经涨了这么多了，还能追吗？"这是每个交易者都会问自己的问题。CIS的经验：连板股最大的风险不是断板，而是你以为它要断板了结果没断——然后你追在高点。'
+            })
+        elif lbs == 1:
+            market_psych.append({
+                'emotion': 'hope',
+                'label': '首板不确定性',
+                'analysis': '首板——第一天涨停的股票有一半第二天会断板。交易心理学：首板的买入者心理最脆弱，稍有风吹草动就会止损。'
+            })
+
+        # ---- Discipline rules ----
+        discipline.append(f'仓位管理：当前情绪温度{market_score}°，{"应减仓至50%以下" if market_score < 50 else "可保持正常仓位" if market_score < 75 else "警惕过热，不宜加仓"}')
+        discipline.append(f'止损纪律：如果明日开盘{name}({code})跌幅超过3%，无条件止损——"第一笔亏损是最便宜的亏损"')
+        discipline.append(f'确认原则：明日必须看到{"开盘高开3%以上" if lb >= 2 else "开盘高开且10分钟内不翻绿"}才可持有，否则减半仓')
+        if cis and livermore:
+            if livermore['score'] >= 65 and cis['score'] >= 65:
+                discipline.append('双大师共振看多——这是少数可以加仓的机会，但仍需遵守止损纪律')
+            elif livermore['score'] < 50 and cis['score'] < 50:
+                discipline.append('双大师共振回避——宁可错过，不可做错。市场永远有下一次机会')
+            else:
+                discipline.append('大师意见分歧——降低仓位至正常水平的50%，等待市场给出更明确的信号')
+        discipline.append('心理法则：交易前问自己三个问题——"我是在交易还是在赌博？" "如果明天跌停我能接受吗？" "这个价格我愿意持有3天吗？"')
+
+        # ---- Emotional temperature ----
+        emo_score = 50
+        emo_score += (10 if ft <= 93500 else (5 if ft <= 100000 else -5))
+        emo_score += (10 if zc == 0 else (-5 if zc == 1 else -15))
+        emo_score += (5 if hsl is not None and 3 <= hsl <= 15 else (-5 if hsl is not None and hsl > 25 else 0))
+        emo_score += (5 if lb >= 3 else (-3 if lb == 1 else 0))
+        emo_score += (10 if fb > 1e9 else (5 if fb > 3e8 else -5))
+        emo_score = max(0, min(100, emo_score))
+
+        if emo_score >= 75:
+            elabel, eadvice = '极度亢奋', '"别人贪婪时我恐惧"——巴菲特。市场情绪已到极端，保持冷静，设定严格的止盈线。'
+        elif emo_score >= 55:
+            elabel, eadvice = '温和乐观', '情绪健康，市场理性。这是最适合交易的区间——既有机会又不失理智。'
+        elif emo_score >= 35:
+            elabel, eadvice = '犹豫不安', '市场存在分歧，建议缩小仓位等待方向明朗。模糊的正确胜过精确的错误。'
+        else:
+            elabel, eadvice = '恐惧蔓延', '"别人恐惧时我贪婪"——巴菲特。但请确保你有足够的安全边际和耐心。'
+
+        return {
+            'market_psych': market_psych,
+            'discipline': discipline,
+            'emotional_state': {'score': emo_score, 'label': elabel, 'advice': eadvice}
+        }
+
     def analyze_stock_sector(self, row):
         """分析个股所在板块的强度"""
         sector = str(row.get('所属行业', '') or '')
@@ -1787,6 +1949,40 @@ def render_tab_stocks(analyzer, today_str):
             st.caption(pred['detail'])
     else:
         st.caption('预判数据不足')
+
+    # ---- Trading Psychology Analysis ----
+    st.subheader('交易心理分析')
+    try:
+        psych = analyzer.compute_psychology(row, hist_df, livermore, cis, lhb, market_score)
+    except:
+        psych = None
+    if psych:
+        col_p1, col_p2 = st.columns(2)
+        with col_p1:
+            for item in psych['market_psych'][:4]:
+                icon_map = {'greed': '🟢', 'fear': '🔴', 'fomo': '🟠', 'calm': '🔵', 'panic': '⚫', 'hope': '🟡'}
+                icon = icon_map.get(item['emotion'], '⚪')
+                st.caption(f"{icon} **{item['label']}**: {item['analysis']}")
+        with col_p2:
+            for rule in psych['discipline'][:4]:
+                st.caption(f'💡 {rule}')
+        # Emotional state meter
+        em = psych['emotional_state']
+        em_color = '#38ef7d' if em['score'] >= 70 else ('#f5c542' if em['score'] >= 40 else '#f5576c')
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#1a1a2e,#16213e); border-radius:12px; padding:16px; margin:8px 0;">
+            <div style="display:flex; justify-content:space-around; align-items:center;">
+                <div style="text-align:center;">
+                    <div style="font-size:12px;color:#888;">情绪温度计</div>
+                    <div style="font-size:40px;font-weight:800;color:{em_color};">{em['score']}°</div>
+                    <div style="font-size:14px;color:{em_color};">{em['label']}</div>
+                </div>
+                <div style="text-align:left;font-size:13px;color:#ccc;max-width:300px;">{em['advice']}</div>
+            </div>
+        </div>
+        """, unsafe_allow_html=True)
+    else:
+        st.caption('心理分析数据不足')
 
     # ---- Fast quality ranking table (no K-line calls) ----
     st.subheader('涨停股快评排名')
