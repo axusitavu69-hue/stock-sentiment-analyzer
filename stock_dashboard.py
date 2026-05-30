@@ -331,215 +331,165 @@ class StockAnalyzer:
     # ==================== Livermore Analysis ====================
 
     def compute_livermore_analysis(self, row, hist_df, market_sentiment_score):
-        """利弗莫尔思维选股分析
-        五大原则:
-        1. 关键点突破 - 封板是否构成真正的突破信号
-        2. 趋势跟随 - 股价趋势方向与强度
-        3. 量价配合 - 成交量确认价格行为
-        4. 领涨股识别 - 该股在市场中是否属于领导者
-        5. 市场环境 - 整体情绪是否配合
-        """
-        # Convert all values to Python scalars to avoid pandas Series ambiguity
+        """利弗莫尔思维选股分析"""
+        try:
+            return self._livermore_impl(row, hist_df, market_sentiment_score)
+        except Exception as e:
+            import traceback
+            err_line = traceback.format_exc().strip().split('\n')[-2] if traceback.format_exc().strip() else str(e)
+            return {
+                'score': 50, 'pivotal': 10, 'trend': 10, 'volume': 10,
+                'leader': 10, 'environment': 10,
+                'verdict': '分析异常',
+                'verdict_detail': f'计算过程中断: {err_line}',
+                'analysis': [f'[错误] {e}']
+            }
+
+    def _livermore_impl(self, row, hist_df, market_sentiment_score):
+        # Convert all values to Python scalars
+        def _s(val): return val.item() if hasattr(val, 'item') else (float(val) if not isinstance(val, (str, type(None))) else val)
         def _v(key, default=0):
             val = row.get(key, default)
-            try: val = float(val)
-            except: pass
-            return val if not isinstance(val, pd.Series) else default
+            try: return _s(val)
+            except: return default
+
         ft = self.parse_fengban_time(_v('首次封板时间', 150000))
         zc = int(_v('炸板次数', 0))
         fb = _v('封板资金', 0)
         hsl = _v('换手率', 0)
-        lb = int(_v('连板数', 1))
-        code = str(row.get('代码', '')) if not isinstance(row.get('代码', ''), pd.Series) else ''
-        name = str(row.get('名称', '')) if not isinstance(row.get('名称', ''), pd.Series) else ''
+        lb = max(1, int(_v('连板数', 1)))
+        code = str(_v('代码', ''))
+        name = str(_v('名称', ''))
 
         score = 0
         analysis = []
+        pv_score = trend_score = vol_score = leader_score = env_score = 0
+        last_close = 0
+        close_arr = np.array([])
+
+        # ---- K-line data processing ----
+        has_kline = (hist_df is not None and hasattr(hist_df, 'empty') and not hist_df.empty and len(hist_df) >= 20)
+        if has_kline:
+            close_arr = np.array(hist_df['close'].values, dtype=float).flatten()
+            high_arr = np.array(hist_df['high'].values, dtype=float).flatten()
+            vol_arr_raw = np.array(hist_df['volume'].values, dtype=float).flatten()
+            last_close = float(close_arr[-1])
+            if len(close_arr) >= 20:
+                ma20_val = float(np.mean(close_arr[-20:]))
+            else:
+                ma20_val = float(np.mean(close_arr))
 
         # ---- 原则1: 关键点突破 (0-20分) ----
-        pv_score = 0
-        if not hist_df.empty and len(hist_df) >= 20:
-            close_arr = hist_df['close'].values.astype(float)
-            ma20 = pd.Series(close_arr).rolling(20).mean().values[-1]
-            last_close = close_arr[-1]
-            prev_high_20 = pd.Series(hist_df['high'].values[:-1]).rolling(20).max().values[-1] if len(hist_df) > 20 else ma20
-
+        if has_kline:
             if ft <= 92500:
-                pv_score += 8
-                analysis.append('集合竞价封板，关键点突破力度极强——利弗莫尔会视此为决定性突破信号')
+                pv_score += 8; analysis.append('集合竞价封板，关键点突破力度极强')
             elif ft <= 93500:
-                pv_score += 6
-                analysis.append('早盘秒板，主力攻击意愿明确，关键点突破有效')
+                pv_score += 6; analysis.append('早盘秒板，主力攻击意愿明确')
             elif ft <= 100000:
-                pv_score += 4
-                analysis.append('早盘封板，突破确认但不够强势，需观察后续')
+                pv_score += 4; analysis.append('早盘封板，突破确认')
             else:
-                pv_score += 1
-                analysis.append('封板时间偏晚，利弗莫尔不会在尾盘追涨——"不要追逐市场"')
-
+                pv_score += 1; analysis.append('封板偏晚——"不要追逐市场"')
             if zc == 0:
-                pv_score += 7
-                analysis.append('盘中无炸板，封单坚定——"股票表现正如你所料"')
+                pv_score += 7; analysis.append('无炸板，封单坚定')
             elif zc == 1:
-                pv_score += 3
-                analysis.append('炸板1次后回封，支撑存在但不够稳固')
+                pv_score += 3; analysis.append('炸板1次回封，支撑不稳固')
             else:
-                pv_score += 0
-                analysis.append(f'炸板{zc}次——利弗莫尔会立即退出："如果你的股票表现异常，不要问为什么，走！"')
-
+                pv_score += 0; analysis.append(f'炸板{zc}次——"股票表现异常，立即退出"')
             if lb >= 3:
-                pv_score += 5
-                analysis.append(f'{lb}连板延续中——"正在上涨的股票往往继续上涨"')
+                pv_score += 5; analysis.append(f'{lb}连板——"正在上涨的股票往往继续上涨"')
             elif lb == 2:
                 pv_score += 3
         else:
             pv_score += 5
-
         score += min(20, pv_score)
 
         # ---- 原则2: 趋势跟随 (0-20分) ----
-        trend_score = 0
-        if not hist_df.empty and len(hist_df) >= 20:
-            close_arr = hist_df['close'].values.astype(float)
-            ma5 = pd.Series(close_arr).rolling(5).mean()
-            ma20 = pd.Series(close_arr).rolling(20).mean()
-            if ma5.values[-1] > ma20.values[-1] and ma5.values[-2] > ma20.values[-2]:
-                trend_score += 10
-                analysis.append('多头排列，趋势向上——"永远不要与趋势为敌"')
-            elif close_arr[-1] > ma20.values[-1]:
-                trend_score += 6
-                analysis.append('股价站上20日均线，趋势偏多')
+        if has_kline:
+            if len(close_arr) >= 5:
+                ma5_last = float(np.mean(close_arr[-5:]))
             else:
-                trend_score += 2
-                analysis.append('股价低于20日均线，逆趋势涨停——利弗莫尔会保持谨慎')
-
-            # Check trend strength
+                ma5_last = last_close
+            if last_close > ma20_val and ma5_last > ma20_val:
+                trend_score += 10; analysis.append('多头排列，趋势向上')
+            elif last_close > ma20_val:
+                trend_score += 6; analysis.append('站上20日均线，趋势偏多')
+            else:
+                trend_score += 2; analysis.append('低于20日均线——"不与趋势为敌"')
             if len(close_arr) >= 30:
-                month_ago = close_arr[-20]
-                if close_arr[-1] > month_ago * 1.1:
-                    trend_score += 5
-                    analysis.append('近一个月涨幅超过10%，动量充足')
-                elif close_arr[-1] > month_ago:
+                if last_close > float(close_arr[-20]) * 1.1:
+                    trend_score += 5; analysis.append('月涨幅>10%，动量充足')
+                elif last_close > float(close_arr[-20]):
                     trend_score += 3
-
-            # Breakout vs MA
-            if last_close > ma20 * 1.05:
-                trend_score += 5
-                analysis.append('股价脱离均线大幅上攻——突破关键阻力位')
+            if last_close > ma20_val * 1.05:
+                trend_score += 5; analysis.append('脱离均线大幅上攻——突破阻力位')
         else:
             trend_score += 8
         score += min(20, trend_score)
 
         # ---- 原则3: 量价配合 (0-20分) ----
-        vol_score = 0
-        if not hist_df.empty and len(hist_df) >= 5:
-            vol_arr = hist_df['volume'].values.astype(float)
-            avg_vol_5 = pd.Series(vol_arr[-6:-1]).mean() if len(vol_arr) > 5 else vol_arr[:-1].mean()
-            today_vol = vol_arr[-1]
-            if today_vol > avg_vol_5 * 2:
-                vol_score += 8
-                analysis.append('成交量爆发（>2倍均量）——"成交量不会骗人"，大资金正在行动')
-            elif today_vol > avg_vol_5 * 1.3:
-                vol_score += 5
-                analysis.append('成交量温和放大，配合涨势')
+        if has_kline and len(vol_arr_raw) >= 5:
+            today_vol = float(vol_arr_raw[-1])
+            avg_vol = float(np.mean(vol_arr_raw[-6:-1])) if len(vol_arr_raw) > 5 else float(np.mean(vol_arr_raw[:-1]))
+            if today_vol > avg_vol * 2:
+                vol_score += 8; analysis.append('成交量爆发——大资金正在行动')
+            elif today_vol > avg_vol * 1.3:
+                vol_score += 5; analysis.append('温和放量，配合涨势')
             else:
                 vol_score += 2
-
             if hsl is not None and 3 <= hsl <= 15:
-                vol_score += 7
-                analysis.append(f'换手率{hsl}%处于健康区间——筹码交换充分，有利于后续上涨')
-            elif hsl is not None and 0 < hsl < 3:
+                vol_score += 7; analysis.append(f'换手率{hsl}%健康')
+            elif hsl is not None and hsl > 0:
                 vol_score += 4
-                analysis.append('换手率偏低，筹码锁定较好但流动性不足')
-            elif hsl is not None and hsl > 20:
-                vol_score += 2
-                analysis.append('换手率过高——利弗莫尔会警惕："过度的活跃往往预示着顶部"')
-
-            if fb > 5e8:
-                vol_score += 5
-            elif fb > 1e8:
-                vol_score += 3
+            if fb > 5e8: vol_score += 5
+            elif fb > 1e8: vol_score += 3
         else:
             vol_score += 10
         score += min(20, vol_score)
 
         # ---- 原则4: 领涨股识别 (0-20分) ----
-        leader_score = 0
         if lb >= 4:
-            leader_score += 10
-            analysis.append(f'{lb}连板领涨股——"永远买最强的股票，不要买便宜的垃圾"')
+            leader_score += 10; analysis.append(f'{lb}连板领涨股——"买最强的"')
         elif lb >= 2:
             leader_score += 6
-            analysis.append(f'{lb}连板，处于市场前排')
-
-        sector = row.get('所属行业', '')
+        sector = str(row.get('所属行业', '') or '')
         if sector:
-            leader_score += 5
-            analysis.append(f'所属「{sector}」板块——"板块中的领涨股往往是最安全的"')
-
+            leader_score += 5; analysis.append(f'「{sector}」板块龙头')
         if fb > 1e9:
-            leader_score += 5
-            analysis.append('封单超过10亿，主力资金高度认可')
+            leader_score += 5; analysis.append('封单超10亿，主力高度认可')
         elif fb > 3e8:
             leader_score += 3
-
         score += min(20, leader_score)
 
         # ---- 原则5: 市场环境 (0-20分) ----
-        env_score = 0
         if market_sentiment_score >= 80:
-            env_score += 10
-            analysis.append('市场情绪强劲（>80分）——"在牛市中，每个人都能赚钱"')
+            env_score += 10; analysis.append('市场情绪强劲——"牛市人人赚钱"')
         elif market_sentiment_score >= 60:
-            env_score += 7
-            analysis.append('市场情绪温和，环境适合交易')
+            env_score += 7; analysis.append('情绪温和，适合交易')
         elif market_sentiment_score >= 40:
-            env_score += 4
-            analysis.append('市场情绪偏弱，利弗莫尔会建议减仓观望')
+            env_score += 4; analysis.append('情绪偏弱，建议减仓观望')
         else:
-            env_score += 1
-            analysis.append('市场情绪低迷——"不在没有趋势的市场中交易"')
-
-        if zc == 0:
-            env_score += 5
-            analysis.append('市场环境良好，资金信心充足')
-        elif zc > 2:
-            env_score += 0
-            analysis.append('多次炸板反映市场整体脆弱')
-
+            env_score += 1; analysis.append('情绪低迷——"没有趋势不交易"')
+        if zc == 0: env_score += 5
         if lb >= 3 and market_sentiment_score >= 60:
-            env_score += 5
-            analysis.append('牛市+连板股——利弗莫尔最喜欢的组合：趋势确认后的加仓机会')
-
+            env_score += 5; analysis.append('牛市+连板——利弗莫尔最爱的组合')
         score += min(20, env_score)
 
-        # ---- 综合判定 ----
         if score >= 80:
-            verdict = '强烈推荐'
-            verdict_detail = '该股完美符合利弗莫尔的核心法则：关键点突破有力、趋势向上、量价配合、属于领涨股、市场环境配合。这是利弗莫尔会"金字塔加仓"的标的。'
+            verdict, detail = '强烈推荐', '完美符合利弗莫尔核心法则，可金字塔加仓'
         elif score >= 65:
-            verdict = '推荐关注'
-            verdict_detail = '符合利弗莫尔大部分选股标准，但个别维度有瑕疵。可小仓位试探，若次日延续强势再行加仓。'
+            verdict, detail = '推荐关注', '大部分符合，可小仓位试探'
         elif score >= 50:
-            verdict = '谨慎观察'
-            verdict_detail = '部分符合利弗莫尔法则，但存在明显短板。利弗莫尔会将其放入观察名单："等待股票自己证明自己"。'
+            verdict, detail = '谨慎观察', '"等待股票自己证明自己"'
         elif score >= 35:
-            verdict = '不推荐'
-            verdict_detail = '多个维度不符合利弗莫尔选股标准。利弗莫尔会认为"这不是我想要的交易"。'
+            verdict, detail = '不推荐', '"这不是我想要的交易"'
         else:
-            verdict = '强烈回避'
-            verdict_detail = '该股几乎完全不符合利弗莫尔法则。记住利弗莫尔最重要的一句话："保住本金，等待真正的机会"。'
+            verdict, detail = '强烈回避', '"保住本金，等待真正的机会"'
 
         return {
-            'score': score,
-            'pivotal': pv_score,
-            'trend': trend_score,
-            'volume': vol_score,
-            'leader': leader_score,
-            'environment': env_score,
-            'verdict': verdict,
-            'verdict_detail': verdict_detail,
-            'analysis': analysis
+            'score': score, 'pivotal': min(20, pv_score), 'trend': min(20, trend_score),
+            'volume': min(20, vol_score), 'leader': min(20, leader_score),
+            'environment': min(20, env_score),
+            'verdict': verdict, 'verdict_detail': detail, 'analysis': analysis
         }
 
     # ==================== Market Breadth ====================
