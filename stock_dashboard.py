@@ -492,6 +492,332 @@ class StockAnalyzer:
             'verdict': verdict, 'verdict_detail': detail, 'analysis': analysis
         }
 
+    # ==================== CIS Analysis ====================
+
+    def compute_cis_analysis(self, row, hist_df, market_sentiment_score):
+        """CIS（日本传奇散户）投资思维分析
+        核心原则:
+        1. 顺势不预判 - "不要去猜顶，跟着走就行"
+        2. 盘口读心术 - 从封板过程读懂资金意图
+        3. 群体心理 - 跟随人群，但第一个离场
+        4. 概率游戏 - 不追求确定性，追求期望值
+        5. 止损如呼吸 - 异常就是离场信号
+        """
+        try:
+            return self._cis_impl(row, hist_df, market_sentiment_score)
+        except:
+            return {
+                'score': 50, 'consensus': 10, 'momentum': 10, 'psychology': 10,
+                'risk': 10, 'execution': 10,
+                'verdict': '数据不足', 'verdict_detail': '', 'analysis': ['分析异常']
+            }
+
+    def _cis_impl(self, row, hist_df, market_sentiment_score):
+        def _s(val):
+            try: return val.item() if hasattr(val, 'item') else float(val)
+            except: return 0
+        def _v(key, default=0):
+            try: return _s(row.get(key, default))
+            except: return default
+
+        ft = self.parse_fengban_time(_v('首次封板时间', 150000))
+        zc = int(_v('炸板次数', 0))
+        fb = _v('封板资金', 0)
+        hsl = _v('换手率', 0)
+        lb = max(1, int(_v('连板数', 1)))
+        sector = str(row.get('所属行业', '') or '')
+        zt_stat = str(row.get('涨停统计', '') or '')  # e.g. "4/4"
+
+        analysis = []
+        cs_score = mo_score = ps_score = ri_score = ex_score = 0
+
+        # ---- 原则1: 群体共识 (Consensus, 0-20) ----
+        # CIS: "市场是投票机，涨停就是投票结果"
+        if ft <= 92500:
+            cs_score += 8
+            analysis.append('集合竞价涨停——"全市场用钱投票，共识最强信号"')
+        elif ft <= 93500:
+            cs_score += 7
+            analysis.append('开盘秒板——群体共识极高，资金抢筹意愿明确')
+        elif ft <= 100000:
+            cs_score += 5
+            analysis.append('早盘封板——共识较强，但部分资金还在犹豫')
+        elif ft <= 113000:
+            cs_score += 3
+            analysis.append('上午封板——共识一般，CIS会说"真正的共识不会犹豫这么久"')
+        else:
+            cs_score += 1
+            analysis.append('尾盘封板——CIS大概率不碰："共识来得太晚，明天可能就散了"')
+
+        # 涨停统计 e.g. "4/4" means 4天4板
+        if '/' in zt_stat:
+            parts = zt_stat.split('/')
+            try:
+                board_days = int(parts[0])
+                if board_days >= 4: cs_score += 6
+                elif board_days >= 2: cs_score += 3
+            except: pass
+
+        if fb > 1e9:
+            cs_score += 6
+            analysis.append('封单超过10亿——"这不是散户能堆出来的，大资金态度明确"')
+        elif fb > 3e8:
+            cs_score += 4
+        elif fb > 1e8:
+            cs_score += 2
+
+        if zc == 0:
+            pass  # already counted
+        elif zc >= 2:
+            cs_score -= 3
+            analysis.append(f'炸板{zc}次——CIS会立即减仓："群体在动摇，先跑为敬"')
+
+        cs_score = max(0, min(20, cs_score))
+
+        # ---- 原则2: 动量惯性 (Momentum, 0-20) ----
+        # CIS: "上涨的股票继续上涨，这是市场的惯性定律"
+        if lb >= 5:
+            mo_score += 8
+            analysis.append(f'{lb}连板——"不要试图预测第几板会断，让市场告诉你"')
+        elif lb >= 3:
+            mo_score += 6
+            analysis.append(f'{lb}连板——惯性充足，CIS会继续持有')
+        elif lb >= 2:
+            mo_score += 4
+
+        if hasattr(hist_df, 'empty') and not hist_df.empty and len(hist_df) >= 5:
+            close_arr = np.array(hist_df['close'].values, dtype=float).flatten()
+            if len(close_arr) >= 5:
+                week_ago = float(close_arr[-5])
+                if last_close := float(close_arr[-1]):
+                    pct_week = (last_close - week_ago) / week_ago * 100 if week_ago > 0 else 0
+                    if pct_week > 15:
+                        mo_score += 7
+                        analysis.append('周涨幅超15%——超级动量股，CIS的核心猎物')
+                    elif pct_week > 8:
+                        mo_score += 5
+                        analysis.append('周涨幅8%+——动量充足')
+                    elif pct_week > 3:
+                        mo_score += 3
+
+            if 'turnover' in hist_df.columns:
+                hsl_vals = np.array(hist_df['turnover'].values[-5:], dtype=float).flatten()
+                if len(hsl_vals) >= 3:
+                    if hsl_vals[-1] > hsl_vals[:-1].mean() * 1.3:
+                        mo_score += 5
+                        analysis.append('换手率递增——"资金在加速进场，动量还在积累"')
+
+        mo_score = min(20, mo_score)
+
+        # ---- 原则3: 群体心理 (Psychology, 0-20) ----
+        # CIS: "读懂市场情绪，就是读懂对手的底牌"
+        if market_sentiment_score >= 80:
+            ps_score += 8
+            analysis.append('市场情绪高涨——"这时候最容易赚钱，也最容易过度自信"')
+        elif market_sentiment_score >= 60:
+            ps_score += 6
+        elif market_sentiment_score >= 40:
+            ps_score += 3
+            analysis.append('情绪偏弱——CIS会缩小仓位："环境不好时减少下注"')
+        else:
+            ps_score += 1
+            analysis.append('情绪低迷——CIS大概率休息："市场没有机会时就等待"')
+
+        if 6 <= hsl <= 18:
+            ps_score += 6
+            analysis.append(f'换手率{hsl}%处于CIS认可的活跃区间——"交投活跃才有机会"')
+        elif hsl > 25:
+            ps_score += 2
+            analysis.append('换手率过高——CIS会警惕："太热了，离转折不远了"')
+
+        if zc == 0:
+            ps_score += 6
+        elif zc == 1:
+            ps_score += 4
+            analysis.append('炸板1次——"群体短暂的怀疑，可以给一次机会"')
+        else:
+            ps_score += 1
+
+        ps_score = min(20, ps_score)
+
+        # ---- 原则4: 风险控制 (Risk, 0-20) ----
+        # CIS: "交易的第一要务：活下去"
+        ri_score = 10  # baseline
+
+        if ft <= 93500 and zc == 0:
+            ri_score += 5
+            analysis.append('早封板+零炸板——风险极低，CIS最喜欢的确定性组合')
+        elif ft <= 100000 and zc <= 1:
+            ri_score += 3
+
+        if lb >= 3:
+            ri_score += 3
+            analysis.append(f'{lb}连板——"浮盈就是最好的止损垫"')
+        elif lb == 1:
+            ri_score -= 2
+            analysis.append('首板——CIS会格外警惕："第一天涨停的股票最容易骗人"')
+
+        if fb < 5e7:
+            ri_score -= 3
+            analysis.append('封单不足5000万——"主力都没信心，散户凭什么有信心"')
+        if hsl > 25:
+            ri_score -= 2
+
+        ri_score = max(2, min(20, ri_score))
+
+        # ---- 原则5: 执行纪律 (Execution, 0-20) ----
+        # CIS: "纪律是交易者的护身符"
+        ex_score = 8  # baseline
+
+        key_signals = 0
+        if ft <= 93500: key_signals += 1
+        if zc == 0: key_signals += 1
+        if fb > 3e8: key_signals += 1
+        if 5 <= hsl <= 18: key_signals += 1
+        if lb >= 2: key_signals += 1
+        if market_sentiment_score >= 60: key_signals += 1
+        if sector: key_signals += 1
+
+        ex_score += key_signals  # 1 point per positive signal
+        ex_score = min(20, ex_score)
+
+        if key_signals >= 6:
+            analysis.append(f'7项检查通过{key_signals}项——"信号共振，可以全力出击"')
+        elif key_signals >= 4:
+            analysis.append(f'通过{key_signals}/7项检查——"信号偏多，正常仓位操作"')
+        elif key_signals >= 2:
+            analysis.append(f'仅通过{key_signals}/7项——"信号不足，减半仓位或观望"')
+        else:
+            analysis.append(f'几乎无信号——"这不是我的机会，让别人去赚这个钱"')
+
+        # ---- 综合 ----
+        total = cs_score + mo_score + ps_score + ri_score + ex_score
+        if total >= 80:
+            verdict = '全力出击'
+            detail = 'CIS会全仓位追击——群体共识强+动量足+风险低+信号共振。这是CIS梦寐以求的"确定性时刻"。'
+        elif total >= 65:
+            verdict = '正常交易'
+            detail = 'CIS会常规仓位参与——多数指标向好，按纪律执行即可。'
+        elif total >= 50:
+            verdict = '轻仓试探'
+            detail = 'CIS会小仓位尝试——"先用小钱感受市场温度，对了再加"'
+        elif total >= 35:
+            verdict = '场外观望'
+            detail = 'CIS不会进场——"宁可错过，不可做错。市场永远有下一次机会"'
+        else:
+            verdict = '坚决回避'
+            detail = 'CIS会反向操作（如果有持仓会立即清仓）——"亏得最少就是赚得最多"'
+
+        return {
+            'score': total,
+            'consensus': cs_score, 'momentum': mo_score, 'psychology': ps_score,
+            'risk': ri_score, 'execution': ex_score,
+            'verdict': verdict, 'verdict_detail': detail, 'analysis': analysis
+        }
+
+    # ==================== Per-Stock Sector + Prediction ====================
+
+    def analyze_stock_sector(self, row):
+        """分析个股所在板块的强度"""
+        sector = str(row.get('所属行业', '') or '')
+        code = str(row.get('代码', ''))
+        if not sector:
+            return None
+        # Count how many limit-up stocks in same sector
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        if limit_df.empty or '所属行业' not in limit_df.columns:
+            return {'sector_name': sector, 'zt_count': 1, 'total': 1, 'rank': '?',
+                    'strength': '一般', 'analysis': f'「{sector}」板块数据不足'}
+        sector_zt = limit_df[limit_df['所属行业'] == sector]
+        all_zt_count = len(limit_df)
+        sector_count = len(sector_zt)
+        rank = 1
+        for name, cnt in limit_df['所属行业'].value_counts().items():
+            if name == sector: break
+            rank += 1
+
+        # Determine sector strength
+        pct = round(sector_count / all_zt_count * 100, 1) if all_zt_count > 0 else 0
+        if pct >= 15:
+            strength = '绝对主线'
+            analysis_str = f'「{sector}」涨停{sector_count}只，占全市场{pct}%——绝对主线板块，资金深度介入。CIS会说"跟着主线走就对了"。'
+        elif pct >= 8:
+            strength = '核心板块'
+            analysis_str = f'「{sector}」涨停{sector_count}只，排名第{rank}——核心板块之一，持续性可期。'
+        elif pct >= 3:
+            strength = '活跃板块'
+            analysis_str = f'「{sector}」涨停{sector_count}只——有一定热度但不是主线，关注是否扩散。'
+        else:
+            strength = '边缘板块'
+            analysis_str = f'「{sector}」仅{code}等涨停——独立个股行情，板块效应弱。利弗莫尔会降低仓位。'
+
+        return {'sector_name': sector, 'zt_count': sector_count, 'total': all_zt_count,
+                'pct': pct, 'rank': rank, 'strength': strength, 'analysis': analysis_str}
+
+    def predict_stock_next_day(self, row):
+        """对单只个股的明日走势预测"""
+        ft = self.parse_fengban_time(row.get('首次封板时间', 150000))
+        zc = int(row.get('炸板次数', 0) or 0)
+        fb = row.get('封板资金', 0) or 0
+        hsl = row.get('换手率', 0) or 0
+        lb = max(1, int(row.get('连板数', 1) or 1))
+        sector = str(row.get('所属行业', '') or '')
+
+        # Strength signals
+        signals = []
+        confidence = 50
+
+        # Early封板 = strong
+        if ft <= 92500: signals.append('集合竞价封板'); confidence += 15
+        elif ft <= 93500: signals.append('早盘秒板'); confidence += 10
+        elif ft <= 100000: signals.append('早盘封板'); confidence += 5
+        else: signals.append('封板偏晚'); confidence -= 10
+
+        # No炸板 = reliable
+        if zc == 0: signals.append('零炸板'); confidence += 10
+        elif zc == 1: signals.append('炸板1次'); confidence -= 3
+        else: signals.append(f'多次炸板'); confidence -= 15
+
+        # 连板 momentum
+        if lb >= 4: signals.append(f'{lb}连板惯性'); confidence += 10
+        elif lb >= 2: signals.append(f'{lb}连板'); confidence += 5
+        else: signals.append('首板不确定'); confidence -= 5
+
+        # 封单
+        if fb > 1e9: signals.append('封单>10亿'); confidence += 10
+        elif fb > 3e8: signals.append('封单充足'); confidence += 5
+        else: confidence -= 3
+
+        # 换手
+        if 3 <= hsl <= 15: signals.append('换手健康'); confidence += 5
+        elif hsl > 25: signals.append('换手过高'); confidence -= 8
+
+        confidence = max(5, min(95, confidence))
+
+        # Verdict
+        if confidence >= 75:
+            outlook = '大概率连板'
+            detail = '封板质量高 + 动量充足 + 无明显风险信号。涨停次日大概率高开甚至一字。'
+        elif confidence >= 60:
+            outlook = '偏多震荡'
+            detail = '整体偏强，但存在小瑕疵。可能高开后震荡，有一定概率回封。'
+        elif confidence >= 45:
+            outlook = '不确定'
+            detail = '多空信号交织。利弗莫尔会减仓观察，CIS会说"让市场走两步再判断"。'
+        elif confidence >= 30:
+            outlook = '大概率断板'
+            detail = '弱势信号较多，次日低开或冲高回落概率大。建议减仓或清仓。'
+        else:
+            outlook = '强烈看空'
+            detail = '多个致命弱点——尾盘封板+多次炸板+封单不足，断板几乎确定。'
+
+        return {
+            'outlook': outlook, 'confidence': confidence,
+            'signals': '，'.join(signals),
+            'detail': detail
+        }
+
+
     # ==================== Market Breadth ====================
 
     def compute_market_breadth(self, industry_df):
@@ -1112,6 +1438,98 @@ def render_tab_stocks(analyzer, today_str):
         st.caption('"投机不是赌博，而是对未来的周密计算。市场永远不会错，但你的观点常常是错的。" ——杰西·利弗莫尔')
 
     st.divider()
+
+    # ---- CIS Analysis (side by side with Livermore) ----
+    st.subheader('CIS 盘口猎手分析')
+    try:
+        cis = analyzer.compute_cis_analysis(row, hist_df, market_score)
+    except Exception as e:
+        cis = None; st.error(f'CIS分析出错: {e}')
+
+    if cis:
+        ll, rr = st.columns(2)
+        with ll:
+            # Livermore recap (compact)
+            lc2 = '#38ef7d' if livermore['score'] >= 80 else ('#f5c542' if livermore['score'] >= 50 else '#f5576c')
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1a1a2e,#16213e); border-radius:12px; padding:16px;
+                        border-left:4px solid {lc2}; margin:8px 0;">
+                <b>利弗莫尔</b> <span style="color:{lc2};font-size:24px;font-weight:700;">{livermore['score']}</span>/100
+                <span style="color:#888;margin-left:8px;">{livermore['verdict']}</span>
+                <div style="font-size:12px;color:#aaa;margin-top:4px;">趋势跟随 + 关键点突破 + 领涨股识别</div>
+            </div>
+            """, unsafe_allow_html=True)
+            for a in livermore['analysis'][:3]:
+                st.caption(f'• {a}')
+
+        with rr:
+            # CIS card
+            cc = '#38ef7d' if cis['score'] >= 80 else ('#f5c542' if cis['score'] >= 50 else '#f5576c')
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1a1a2e,#16213e); border-radius:12px; padding:16px;
+                        border-left:4px solid {cc}; margin:8px 0;">
+                <b>CIS（西斯）</b> <span style="color:{cc};font-size:24px;font-weight:700;">{cis['score']}</span>/100
+                <span style="color:#888;margin-left:8px;">{cis.get('verdict','?')}</span>
+                <div style="font-size:12px;color:#aaa;margin-top:4px;">群体共识 + 动量惯性 + 风险纪律</div>
+            </div>
+            """, unsafe_allow_html=True)
+            for a in cis['analysis'][:3]:
+                st.caption(f'• {a}')
+
+        # Combined verdict
+        avg = (livermore['score'] + cis['score']) / 2
+        ac = '#38ef7d' if avg >= 75 else ('#f5c542' if avg >= 55 else '#f5576c')
+        if avg >= 75:
+            combo = '双大师共振看多——利弗莫尔和CIS都会重仓这只股票。这是极少见的共识时刻。'
+        elif avg >= 55:
+            combo = '一方看好、一方谨慎——分歧中存在机会，建议中等仓位。'
+        else:
+            combo = '双大师共振回避——两位顶级交易员都不会碰这只股票。理性投资者应当等待更好的机会。'
+        st.info(f'**综合研判**: {combo}')
+
+    # ---- Sector Analysis ----
+    st.subheader('板块分析')
+    try:
+        sector_info = analyzer.analyze_stock_sector(row)
+    except Exception as e:
+        sector_info = None
+    if sector_info:
+        sc1, sc2 = st.columns([3, 1])
+        with sc1:
+            st.markdown(f"""
+            <div class="insight-card sector-hot">
+                <b>{sector_info['sector_name']}</b> · {sector_info['strength']} · 排名第{sector_info['rank']}
+                <div style="font-size:13px;color:#ccc;margin-top:4px;">{sector_info['analysis']}</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with sc2:
+            st.metric('板块涨停数', f"{sector_info['zt_count']}/{sector_info['total']}")
+    else:
+        st.caption('无板块分类数据')
+
+    # ---- Next-Day Prediction ----
+    st.subheader('明日走势预判')
+    try:
+        pred = analyzer.predict_stock_next_day(row)
+    except Exception as e:
+        pred = None
+    if pred:
+        pc = '#38ef7d' if pred['confidence'] >= 70 else ('#f5c542' if pred['confidence'] >= 45 else '#f5576c')
+        pr1, pr2 = st.columns([2, 3])
+        with pr1:
+            st.markdown(f"""
+            <div style="background:linear-gradient(135deg,#1a1a2e,#16213e); border-radius:12px; padding:20px; text-align:center;
+                        border:2px solid {pc};">
+                <div style="font-size:12px;color:#888;">明日预判</div>
+                <div style="font-size:32px;font-weight:800;color:{pc};">{pred['outlook']}</div>
+                <div style="font-size:20px;color:{pc};">置信度 {pred['confidence']}%</div>
+            </div>
+            """, unsafe_allow_html=True)
+        with pr2:
+            st.caption(f'**关键信号**: {pred["signals"]}')
+            st.caption(pred['detail'])
+    else:
+        st.caption('预判数据不足')
 
     # ---- Fast quality ranking table (no K-line calls) ----
     st.subheader('涨停股快评排名')
