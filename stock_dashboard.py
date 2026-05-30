@@ -715,6 +715,143 @@ class StockAnalyzer:
             'verdict': verdict, 'verdict_detail': detail, 'analysis': analysis
         }
 
+    # ==================== Dragon-Tiger List Analysis ====================
+
+    # Known seat behavior database
+    SEAT_KNOWN = {
+        '紫阳东路': {'type': '砸盘型', 'style': '次日高开即砸盘出货，封板后跟风需谨慎',
+                     'hold_prob': 20, 'risk': '高', 'desc': '知名游资，以砸盘著称。上榜后次日大概率高开低走。'},
+        '华泰荣超': {'type': '一日游', 'style': '当天买次日卖，极少持股超过2天',
+                     'hold_prob': 25, 'risk': '高', 'desc': '著名一日游席位。上榜即意味着次日存在抛压。'},
+        '深股通专用': {'type': '外资', 'style': '北向资金，中长线为主，短线较稳定',
+                       'hold_prob': 70, 'risk': '低', 'desc': '北向资金席位，偏向价值投资，短期抛压小。'},
+        '沪股通专用': {'type': '外资', 'style': '北向资金，中长线持有',
+                       'hold_prob': 70, 'risk': '低', 'desc': '北向资金席位。'},
+        '机构专用': {'type': '机构', 'style': '机构调仓，通常有持续性',
+                     'hold_prob': 65, 'risk': '中低', 'desc': '机构席位，买入通常有持续性逻辑。'},
+        '中信上海': {'type': '锁仓型', 'style': '知名游资，有时锁仓做波段',
+                     'hold_prob': 55, 'risk': '中', 'desc': '实力游资，有一定格局，不完全是一日游。'},
+        '银河绍兴': {'type': '跟风型', 'style': '喜欢追涨停，次日跟风盘多时出货',
+                     'hold_prob': 35, 'risk': '中高', 'desc': '游资跟风席位，持续性取决于次日人气。'},
+        '光大宁波': {'type': '波段型', 'style': '中等持仓周期，3-5天波段操作',
+                     'hold_prob': 50, 'risk': '中', 'desc': '波段游资，不急于次日出货。'},
+        '招商益田路': {'type': '砸盘型', 'style': '和紫阳东路类似，习惯次日砸盘',
+                       'hold_prob': 20, 'risk': '高', 'desc': '与紫阳东路齐名的砸盘席位。'},
+        '东方杭州': {'type': '锁仓型', 'style': '杭州本地实力游资，偶尔锁仓',
+                     'hold_prob': 55, 'risk': '中', 'desc': '杭州主力席位。'},
+        '中金公司': {'type': '机构', 'style': '中金自营或资管，偏中长期',
+                     'hold_prob': 60, 'risk': '中低', 'desc': '中金系资金。'},
+        '国泰君安': {'type': '综合型', 'style': '大券商综合席位，无法判断单一风格',
+                     'hold_prob': 50, 'risk': '中', 'desc': '综合性大席位。'},
+        '华鑫上海': {'type': '量化型', 'style': '量化打板席位，机器决策进出极快',
+                     'hold_prob': 30, 'risk': '高', 'desc': '量化席位，AI决策，进出极为迅速。'},
+        '上海溧阳路': {'type': '砸盘型', 'style': '著名砸盘游资，人称溧阳路',
+                       'hold_prob': 22, 'risk': '高', 'desc': '一线游资，风格凶悍，次日砸盘概率极高。'},
+    }
+
+    @staticmethod
+    @st.cache_data(ttl=600)
+    def fetch_lhb_data(date_str):
+        """获取龙虎榜数据"""
+        import akshare as ak
+        try:
+            df = ak.stock_lhb_detail_em(start_date=date_str, end_date=date_str)
+            if df is not None and not df.empty:
+                return df
+        except:
+            pass
+        try:
+            df = ak.stock_lhb_detail_daily_sina(date=date_str)
+            if df is not None and not df.empty:
+                return df
+        except:
+            pass
+        return pd.DataFrame()
+
+    def analyze_lhb_for_stock(self, stock_code):
+        """分析某只股票的龙虎榜席位"""
+        code_clean = str(stock_code).strip()
+        lhb_df = StockAnalyzer.fetch_lhb_data(self.today_str)
+
+        if lhb_df.empty:
+            return None  # Not on LHB or no data
+
+        # Try to find this stock in LHB data
+        # Columns might be '代码', '股票代码', '名称', etc
+        code_col = None
+        for c in lhb_df.columns:
+            if '代码' in str(c) or 'code' in str(c).lower():
+                code_col = c; break
+        if code_col is None:
+            return None
+
+        lhb_df[code_col] = lhb_df[code_col].astype(str).str.strip()
+        match = lhb_df[lhb_df[code_col] == code_clean]
+        if match.empty:
+            return None
+
+        # Analyze buy and sell seats
+        buy_seats = []; sell_seats = []
+        for _, r in match.iterrows():
+            reason = str(r.get('解读', r.get('上榜原因', '')))
+            for prefix in ['买方营业部', '买入营业部', '买方席位']:
+                for i in range(1, 6):
+                    col = f'{prefix}{i}'
+                    if col in match.columns:
+                        val = str(r.get(col, ''))
+                        if val and val != 'nan':
+                            buy_seats.append(val)
+            for prefix in ['卖方营业部', '卖出营业部', '卖方席位']:
+                for i in range(1, 6):
+                    col = f'{prefix}{i}'
+                    if col in match.columns:
+                        val = str(r.get(col, ''))
+                        if val and val != 'nan':
+                            sell_seats.append(val)
+
+        # Classify seats
+        def classify_seat(name):
+            for known, info in StockAnalyzer.SEAT_KNOWN.items():
+                if known in name:
+                    return info
+            return {'type': '未知席位', 'style': '未记录，需观察',
+                    'hold_prob': 50, 'risk': '未知', 'desc': '没有历史记录的席位，风格未知。'}
+
+        buy_analysis = []
+        for s in buy_seats[:5]:
+            info = classify_seat(s)
+            buy_analysis.append({'席位': s, **info})
+
+        sell_analysis = []
+        for s in sell_seats[:5]:
+            info = classify_seat(s)
+            sell_analysis.append({'席位': s, **info})
+
+        # Overall risk assessment
+        all_buy_risk = [a['risk'] for a in buy_analysis]
+        all_sell_risk = [a['risk'] for a in sell_analysis]
+        has_seller = any(r == '砸盘型' for r in [a['type'] for a in buy_analysis])
+        has_locker = any(r == '锁仓型' for r in [a['type'] for a in buy_analysis])
+
+        if has_seller:
+            risk_verdict = '高位警惕'
+            risk_detail = '买方中有知名砸盘席位——次日大概率高开后出货。CIS会说"先跑为敬"，利弗莫尔会说"异常行为就是离场信号"。'
+        elif '高' in str(all_buy_risk):
+            risk_verdict = '谨慎持有'
+            risk_detail = '买方席位中有高风险风格——建议次日早盘减仓，观察资金承接力度。'
+        elif has_locker:
+            risk_verdict = '乐观看多'
+            risk_detail = '买方以锁仓型席位为主——锁仓游资有格局，不会次日立即砸盘。'
+        else:
+            risk_verdict = '中性观察'
+            risk_detail = '席位结构中性，无极端信号，按正常节奏交易即可。'
+
+        return {
+            'on_lhb': True, 'buy_seats': buy_analysis, 'sell_seats': sell_analysis,
+            'risk_verdict': risk_verdict, 'risk_detail': risk_detail,
+            'buy_count': len(buy_seats), 'sell_count': len(sell_seats)
+        }
+
     # ==================== Per-Stock Sector + Prediction ====================
 
     def analyze_stock_sector(self, row):
@@ -1536,6 +1673,48 @@ def render_tab_stocks(analyzer, today_str):
             st.metric('板块涨停数', f"{sector_info['zt_count']}/{sector_info['total']}")
     else:
         st.caption('无板块分类数据')
+
+    # ---- Dragon-Tiger List Analysis ----
+    st.subheader('龙虎榜席位分析')
+    with st.spinner('查询龙虎榜数据...'):
+        lhb = analyzer.analyze_lhb_for_stock(code)
+    if lhb:
+        # Risk card
+        rc_map = {'高位警惕': '#f5576c', '谨慎持有': '#f5c542', '乐观看多': '#38ef7d', '中性观察': '#4facfe'}
+        rcolor = rc_map.get(lhb['risk_verdict'], '#888')
+        st.markdown(f"""
+        <div style="background:linear-gradient(135deg,#1a1a2e,#16213e); border-radius:12px; padding:16px;
+                    border-left:4px solid {rcolor}; margin:8px 0;">
+            <b>上榜判定</b>: <span style="color:{rcolor};font-weight:700;font-size:18px;">{lhb['risk_verdict']}</span>
+            <div style="font-size:13px;color:#ccc;margin-top:6px;">{lhb['risk_detail']}</div>
+        </div>
+        """, unsafe_allow_html=True)
+
+        # Buy/Sell seats table
+        l1, l2 = st.columns(2)
+        with l1:
+            st.caption(f'**买方席位 ({lhb["buy_count"]}个)**')
+            if lhb['buy_seats']:
+                for s in lhb['buy_seats']:
+                    risk_icon = '🔴' if s['risk'] == '高' else ('🟡' if s['risk'] in ('中','中高') else '🟢')
+                    st.caption(f'{risk_icon} {s["席位"][:20]} · {s["type"]} · 锁仓概率{s["hold_prob"]}%')
+            else:
+                st.caption('无买方数据')
+        with l2:
+            st.caption(f'**卖方席位 ({lhb["sell_count"]}个)**')
+            if lhb['sell_seats']:
+                for s in lhb['sell_seats']:
+                    risk_icon = '🔴' if s['risk'] == '高' else ('🟡' if s['risk'] in ('中','中高') else '🟢')
+                    st.caption(f'{risk_icon} {s["席位"][:20]} · {s["type"]}')
+            else:
+                st.caption('无卖方数据')
+
+        # Tip
+        with st.expander('席位百科'):
+            for name, info in list(StockAnalyzer.SEAT_KNOWN.items())[:10]:
+                st.caption(f'**{name}** ({info["type"]}) — {info["desc"]}')
+    else:
+        st.caption('今日未上龙虎榜（或非交易日无数据）')
 
     # ---- Next-Day Prediction ----
     st.subheader('明日走势预判')
