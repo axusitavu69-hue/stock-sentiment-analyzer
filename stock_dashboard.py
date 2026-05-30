@@ -92,9 +92,20 @@ class StockAnalyzer:
         try:
             end = datetime.now().strftime('%Y%m%d')
             start = (datetime.now() - timedelta(days=days + 5)).strftime('%Y%m%d')
-            # stock_zh_a_daily expects symbol with market prefix
             df = ak.stock_zh_a_daily(symbol=symbol, start_date=start, end_date=end, adjust="qfq")
-            return df if df is not None and not df.empty else pd.DataFrame()
+            if df is None or df.empty:
+                return pd.DataFrame()
+            # Normalize column names: Chinese -> English
+            col_map = {'date':'date','open':'open','high':'high','low':'low','close':'close','volume':'volume',
+                       '日期':'date','开盘':'open','最高':'high','最低':'low','收盘':'close','成交量':'volume',
+                       'amount':'amount','成交额':'amount','outstanding_share':'outstanding_share',
+                       '流通股本':'outstanding_share','turnover':'turnover','换手率':'turnover'}
+            df = df.rename(columns={k:v for k,v in col_map.items() if k in df.columns})
+            # Ensure required columns exist
+            for col in ['date','open','high','low','close','volume']:
+                if col not in df.columns:
+                    return pd.DataFrame()
+            return df
         except Exception as e:
             print(f"[WARN] fetch_stock_history({symbol}): {e}")
             return pd.DataFrame()
@@ -328,13 +339,19 @@ class StockAnalyzer:
         4. 领涨股识别 - 该股在市场中是否属于领导者
         5. 市场环境 - 整体情绪是否配合
         """
-        ft = self.parse_fengban_time(row.get('首次封板时间', 150000))
-        zc = int(row.get('炸板次数', 0) or 0)
-        fb = row.get('封板资金', 0) or 0
-        hsl = row.get('换手率', 0) or 0
-        lb = int(row.get('连板数', 1) or 1)
-        code = str(row.get('代码', ''))
-        name = row.get('名称', '')
+        # Convert all values to Python scalars to avoid pandas Series ambiguity
+        def _v(key, default=0):
+            val = row.get(key, default)
+            try: val = float(val)
+            except: pass
+            return val if not isinstance(val, pd.Series) else default
+        ft = self.parse_fengban_time(_v('首次封板时间', 150000))
+        zc = int(_v('炸板次数', 0))
+        fb = _v('封板资金', 0)
+        hsl = _v('换手率', 0)
+        lb = int(_v('连板数', 1))
+        code = str(row.get('代码', '')) if not isinstance(row.get('代码', ''), pd.Series) else ''
+        name = str(row.get('名称', '')) if not isinstance(row.get('名称', ''), pd.Series) else ''
 
         score = 0
         analysis = []
@@ -1095,8 +1112,20 @@ def render_tab_stocks(analyzer, today_str):
 
     # ---- Livermore Analysis ----
     st.subheader('利弗莫尔思维分析')
-    market_score = min(100, int(num * 2.5 + int(limit_df['连板数'].max() if not limit_df.empty and '连板数' in limit_df.columns else 0) * 10))
-    livermore = analyzer.compute_livermore_analysis(row, hist_df, market_score)
+    try:
+        high_board_val = 0
+        if not limit_df.empty and '连板数' in limit_df.columns:
+            hb_series = limit_df['连板数']
+            if not isinstance(hb_series, (float, int)):
+                high_board_val = int(hb_series.max())
+            else:
+                high_board_val = int(hb_series)
+        market_score = min(100, int(num * 2.5 + high_board_val * 10))
+        livermore = analyzer.compute_livermore_analysis(row, hist_df, market_score)
+    except Exception as e:
+        st.error(f'利弗莫尔分析计算出错: {e}')
+        import traceback; st.code(traceback.format_exc())
+        return
 
     # Score card
     lc = '#38ef7d' if livermore['score'] >= 80 else ('#4facfe' if livermore['score'] >= 60 else ('#f5c542' if livermore['score'] >= 40 else '#f5576c'))
