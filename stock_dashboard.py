@@ -230,20 +230,28 @@ class StockAnalyzer:
         """从 stock_comment_em 获取个股综合得分和关注指数"""
         try:
             comment_df = StockAnalyzer.fetch_stock_comment()
-            if comment_df.empty: return 10, 0
-            # code: e.g. '000001', comment_df column '代码' stores as string
-            match = comment_df[comment_df['代码'].astype(str).str.strip() == str(code).strip()]
-            if not match.empty:
-                row = match.iloc[0]
-                zonghe = float(row.get('综合得分', 50) or 50)
-                guanzhu = float(row.get('关注指数', 50) or 50)
-                # normalize to 0-10 range each
-                sent_score = min(10, zonghe / 10)
-                att_score = min(10, guanzhu / 10)
-                return sent_score, att_score
+            if comment_df is None or comment_df.empty:
+                return 10, 5
+            # Robust column detection
+            code_col = '代码'
+            if code_col not in comment_df.columns:
+                for c in comment_df.columns:
+                    if '代码' in str(c) or 'code' in str(c).lower():
+                        code_col = c; break
+            if code_col not in comment_df.columns:
+                return 10, 5
+            match = comment_df[comment_df[code_col].astype(str).str.strip() == str(code).strip()]
+            if match.empty: return 10, 5
+            row = match.iloc[0]
+            zonghe = 50; guanzhu = 50
+            for c in comment_df.columns:
+                cn = str(c)
+                if '综合得分' in cn or '得分' in cn: zonghe = float(row.get(c, 50) or 50)
+                if '关注指数' in cn or '关注' in cn: guanzhu = float(row.get(c, 50) or 50)
+            return min(10, zonghe / 10), min(10, guanzhu / 10)
         except Exception as e:
             print(f"[WARN] get_stock_sentiment({code}): {e}")
-        return 10, 5
+            return 10, 5
 
     # ==================== 3D Quality Score ====================
 
@@ -1346,22 +1354,30 @@ def main():
 
     t1,t2,t3,t4,t5 = st.tabs(['市场总览', '板块解读', '个股分析', '明日预测', '市场规律'])
     with t1:
-        render_tab_overview(analyzer, today_str)
+        try: render_tab_overview(analyzer, today_str)
+        except Exception as e: st.error(f'Tab1 加载失败: {e}')
     with t2:
-        if st.session_state.get('load_tab2', True):
-            render_tab_sectors(analyzer, today_str)
+        try:
+            if st.session_state.get('load_tab2', True):
+                render_tab_sectors(analyzer, today_str)
+        except Exception as e: st.error(f'Tab2 加载失败: {e}')
     with t3:
-        render_tab_stocks(analyzer, today_str)
+        try: render_tab_stocks(analyzer, today_str)
+        except Exception as e: st.error(f'Tab3 加载失败: {e}')
     with t4:
-        if st.session_state.get('load_tab4', True):
-            render_tab_prediction(analyzer, today_str)
+        try:
+            if st.session_state.get('load_tab4', True):
+                render_tab_prediction(analyzer, today_str)
+        except Exception as e: st.error(f'Tab4 加载失败: {e}')
     with t5:
-        if st.button('加载市场规律数据', key='btn_patterns', use_container_width=True):
-            st.session_state['load_tab5'] = True
-        if st.session_state.get('load_tab5'):
-            render_tab_patterns(analyzer, today_str)
-        else:
-            st.info('点击上方按钮加载市场规律数据（首次加载需采集60天历史数据，约30秒）')
+        try:
+            if st.button('加载市场规律数据', key='btn_patterns', use_container_width=True):
+                st.session_state['load_tab5'] = True
+            if st.session_state.get('load_tab5'):
+                render_tab_patterns(analyzer, today_str)
+            else:
+                st.info('点击上方按钮加载市场规律数据（首次加载需采集60天历史数据，约30秒）')
+        except Exception as e: st.error(f'Tab5 加载失败: {e}')
 
 
 if __name__ == '__main__':
