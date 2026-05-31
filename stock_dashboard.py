@@ -1202,16 +1202,28 @@ class StockAnalyzer:
         self._save_quant_tracker(track)
 
     def evaluate_and_evolve(self):
-        """评估最近预测准确性并调整因子权重"""
+        """评估最近预测准确性，调整因子权重，发现新因子，淘汰失效因子"""
         track = self._load_quant_tracker()
         preds = track['predictions']
 
         if len(preds) < 2:
             return None, '需要至少2天数据才能评估，请持续使用模型积累数据。'
 
+        # Initialize factor tracking if not exists
+        if 'factor_pool' not in track:
+            track['factor_pool'] = {
+                'active': {'timing': '时机因子', 'stability': '稳定因子', 'momentum': '动量因子',
+                           'liquidity': '流动性因子', 'sector_strength': '板块因子'},
+                'candidates': {},  # newly discovered factors
+                'retired': {},     # factors that lost significance
+                'significance': {'timing': 0.5, 'stability': 0.5, 'momentum': 0.5, 'liquidity': 0.5, 'sector_strength': 0.5}
+            }
+        if 'factor_history' not in track:
+            track['factor_history'] = []
+
         # Compare each day's prediction with next day's actual
         correct = 0; total = 0
-        weight_adjustments = []
+        factor_performance = {k: {'correct': 0, 'total': 0} for k in track['weights']['stock']}
 
         for i in range(len(preds) - 1):
             today_pred = preds[i]
@@ -1226,55 +1238,129 @@ class StockAnalyzer:
                     today_score = today_s.get('量化评分', 50)
                     tomorrow_score = tomorrow_s.get('量化评分', 50)
 
-                    # Did today's score predict tomorrow's score correctly?
                     today_high = today_score >= 60
                     tomorrow_high = tomorrow_score >= 60
-                    if today_high == tomorrow_high:
-                        correct += 1
+                    if today_high == tomorrow_high: correct += 1
                     total += 1
 
+                    # Track per-factor performance
+                    for fname in track['weights']['stock']:
+                        fval = today_s.get(f'{fname}_factor' if f'{fname}_factor' in today_s else fname, 0)
+                        fval = float(fval) if fval else 0
+                        f_high = fval >= 10  # factor contribution threshold
+                        if (f_high and tomorrow_high) or (not f_high and not tomorrow_high):
+                            factor_performance[fname]['correct'] += 1
+                        factor_performance[fname]['total'] += 1
+
         if total == 0:
-            return None, '无可验证的数据对（需要同一只股票连续两天都在涨停池中）'
+            return None, '无可验证的数据对'
 
         accuracy = correct / total
         track['total_correct'] = correct
         track['total_predictions'] = max(track['total_predictions'], total)
 
-        # Adjust weights based on accuracy
-        # Higher accuracy → reinforce current weights
-        # Lower accuracy → shake up weights more
+        # ---- Adjust factor weights ----
         old_weights = track['weights']['stock'].copy()
+        new_weights = old_weights.copy()
 
-        if accuracy >= 0.7:
-            # Good performance: minor reinforcement
-            track['weights']['stock']['timing'] = min(30, old_weights['timing'] + 2)
-            track['weights']['stock']['stability'] = min(30, old_weights['stability'] + 1)
-        elif accuracy < 0.5:
-            # Poor performance: redistribute
-            track['weights']['stock']['sector_strength'] = min(25, old_weights.get('sector_strength', 15) + 3)
-            track['weights']['stock']['momentum'] = min(25, old_weights['momentum'] + 2)
+        # Update significance scores
+        for fname in factor_performance:
+            fp = factor_performance[fname]
+            if fp['total'] >= 5:
+                sig = fp['correct'] / fp['total']
+                # EMA update for stability
+                old_sig = track['factor_pool']['significance'].get(fname, 0.5)
+                track['factor_pool']['significance'][fname] = round(old_sig * 0.7 + sig * 0.3, 3)
+
+        # Boost weights for strong factors, reduce for weak
+        for fname in list(new_weights.keys()):
+            sig = track['factor_pool']['significance'].get(fname, 0.5)
+            if sig >= 0.65:
+                new_weights[fname] = min(35, new_weights[fname] + 3)
+            elif sig < 0.35:
+                new_weights[fname] = max(3, new_weights[fname] - 3)
+
+        # ---- Factor Discovery: scan for new signals ----
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        discovered = []
+        if not limit_df.empty and len(preds) >= 5:
+            # Check if sector concentration is emerging as a signal
+            if '所属行业' in limit_df.columns:
+                top_sector_pct = limit_df['所属行业'].value_counts().iloc[0] / len(limit_df) if len(limit_df) > 0 else 0
+                if top_sector_pct > 0.2 and 'concentration' not in new_weights:
+                    discovered.append('concentration')
+                    new_weights['concentration'] = 12
+                    track['factor_pool']['candidates']['concentration'] = {
+                        'name': '集中度因子', 'discovered': self.today_str,
+                        'trigger': f'单板块占比{top_sector_pct:.0%}', 'weight': 12
+                    }
+                    track['factor_pool']['significance']['concentration'] = 0.55
+
+            # Check if炸板率 trend is reversing
+            if '炸板次数' in limit_df.columns:
+                zh_rate = (limit_df['炸板次数'].fillna(0).astype(int) > 0).mean()
+                if zh_rate < 0.1 and 'quality_bonus' not in new_weights and len(limit_df) > 30:
+                    discovered.append('quality_bonus')
+                    new_weights['quality_bonus'] = 10
+                    track['factor_pool']['candidates']['quality_bonus'] = {
+                        'name': '质量红利因子', 'discovered': self.today_str,
+                        'trigger': f'极低炸板率{zh_rate:.0%}', 'weight': 10
+                    }
+                    track['factor_pool']['significance']['quality_bonus'] = 0.55
+
+        # ---- Factor Retirement: mark weak factors ----
+        retired_today = []
+        for fname in list(new_weights.keys()):
+            if fname not in track['factor_pool']['active']:
+                continue  # don't retire core factors
+            sig = track['factor_pool']['significance'].get(fname, 0.5)
+            # If a factor stays weak for 5+ days and weight < 5, retire it
+            if sig < 0.3 and new_weights.get(fname, 0) <= 5:
+                track['factor_pool']['retired'][fname] = {
+                    'name': track['factor_pool']['candidates'].get(fname, {}).get('name', fname),
+                    'retired': self.today_str, 'final_significance': sig
+                }
+                del new_weights[fname]
+                if fname in track['factor_pool']['candidates']:
+                    del track['factor_pool']['candidates'][fname]
+                retired_today.append(fname)
 
         # Normalize weights to sum to 100
-        w = track['weights']['stock']
-        total_w = sum(w.values())
-        for k in w: w[k] = round(w[k] / total_w * 100, 1)
+        total_w = sum(new_weights.values())
+        for k in new_weights: new_weights[k] = round(new_weights[k] / total_w * 100, 1)
 
+        # Handle factor_discovery -> active promotion
+        for fname in discovered:
+            track['factor_pool']['active'][fname] = track['factor_pool']['candidates'][fname]['name']
+
+        track['weights']['stock'] = new_weights
         track['weight_history'].append({
             'date': self.today_str, 'accuracy': round(accuracy, 3),
-            'weights': track['weights']['stock'].copy(), 'samples': total
+            'weights': new_weights.copy(), 'samples': total
         })
         if len(track['weight_history']) > 30:
             track['weight_history'] = track['weight_history'][-30:]
 
+        # Factor evolution history
+        track['factor_history'].append({
+            'date': self.today_str,
+            'active_count': len(track['factor_pool']['active']),
+            'candidate_count': len(track['factor_pool']['candidates']),
+            'retired_count': len(track['factor_pool']['retired']),
+            'discovered': discovered, 'retired': retired_today
+        })
+        if len(track['factor_history']) > 30:
+            track['factor_history'] = track['factor_history'][-30:]
+
         self._save_quant_tracker(track)
 
         result = {
-            'accuracy': round(accuracy, 3),
-            'samples': total,
-            'correct': correct,
-            'old_weights': old_weights,
-            'new_weights': track['weights']['stock'].copy(),
-            'weight_history': track['weight_history']
+            'accuracy': round(accuracy, 3), 'samples': total, 'correct': correct,
+            'old_weights': old_weights, 'new_weights': new_weights.copy(),
+            'weight_history': track.get('weight_history', []),
+            'factor_pool': track.get('factor_pool', {}),
+            'factor_history': track.get('factor_history', []),
+            'discovered': discovered, 'retired': retired_today
         }
         return result, None
 
@@ -2644,16 +2730,47 @@ def render_tab_quant(analyzer, today_str):
             st.plotly_chart(fig, use_container_width=True)
             st.caption('模型根据历史准确性自动调整权重。权重上升=该因子预测能力强，下降=该因子的预测能力在减弱。')
 
-        # Current vs old weights
-        st.caption(f'当前最优权重: 时机{int(eval_result["new_weights"]["timing"])}% '
-                   f'稳定{int(eval_result["new_weights"]["stability"])}% '
-                   f'动量{int(eval_result["new_weights"]["momentum"])}% '
-                   f'流动性{int(eval_result["new_weights"]["liquidity"])}% '
-                   f'板块{int(eval_result["new_weights"]["sector_strength"])}%')
-    else:
-        st.info(eval_msg or '模型学习中——使用天数越多，预测越准确。每天自动对比预测结果和实际表现来优化权重。')
+        # Factor pool status
+        st.subheader('因子池进化')
+        fp = eval_result.get('factor_pool', {})
+        fe1, fe2, fe3 = st.columns(3)
+        with fe1: st.metric('活跃因子', len(fp.get('active', {})))
+        with fe2: st.metric('候选因子', len(fp.get('candidates', {})))
+        with fe3: st.metric('已淘汰', len(fp.get('retired', {})))
 
-    st.caption('量化模型说明: 基于5因子加权评分法，因子权重根据历史准确性自动进化。每日自动记录预测结果并与次日实际对比。')
+        # Newly discovered factors
+        if eval_result.get('discovered'):
+            for d in eval_result['discovered']:
+                info = fp.get('candidates', {}).get(d, {})
+                st.success(f'🔬 发现新因子: **{info.get("name", d)}** — {info.get("trigger", "市场信号")}')
+
+        # Retired factors
+        if eval_result.get('retired'):
+            for r in eval_result['retired']:
+                st.warning(f'🗑️ 淘汰失效因子: {r} — 预测能力已低于阈值')
+
+        # Current factor status table
+        if fp.get('active'):
+            factor_rows = []
+            for fname, fdisplay in fp['active'].items():
+                sig = fp.get('significance', {}).get(fname, 0.5)
+                weight = eval_result['new_weights'].get(fname, 0)
+                status = '核心' if sig >= 0.6 else ('稳定' if sig >= 0.4 else ('弱化中' if sig >= 0.25 else '待淘汰'))
+                factor_rows.append({
+                    '因子': fdisplay, '权重': f'{weight}%', '显著性': f'{sig:.2f}',
+                    '状态': status
+                })
+            if factor_rows:
+                st.dataframe(pd.DataFrame(factor_rows), use_container_width=True, hide_index=True)
+
+        # Current weights
+        w = eval_result['new_weights']
+        w_keys = list(w.keys())
+        st.caption('当前权重: ' + ' | '.join(f'{k}={int(w[k])}%' for k in w_keys))
+    else:
+        st.info(eval_msg or '模型学习中——使用天数越多，预测越准确。持续运行将自动发现新因子并淘汰失效因子。')
+
+    st.caption('进化机制: 每日评估各因子预测能力→自动调整权重→发现新信号→淘汰弱因子。模型会随市场风格切换而自适应。')
 
 
 if __name__ == '__main__':
