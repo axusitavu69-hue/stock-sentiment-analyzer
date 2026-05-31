@@ -72,49 +72,85 @@ os.makedirs("stock_reports", exist_ok=True)
 
 # ===================== 数据获取 =====================
 
-def fetch_kline(code, days=TRAINING_DAYS):
-    """获取个股K线 — Baostock + AKShare双源"""
+def fetch_kline_batch(codes, days=TRAINING_DAYS):
+    """批量获取K线 — 一次登录，批量查询，避免socket错误"""
     import baostock as bs
-    bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
-    import threading, queue
+    end = datetime.now().strftime('%Y-%m-%d')
+    start = (datetime.now() - timedelta(days=days + 20)).strftime('%Y-%m-%d')
+    results = {}
 
-    result_queue = queue.Queue()
-    def _fetch():
-        try:
-            bs.login()
-            end = datetime.now().strftime('%Y-%m-%d')
-            start = (datetime.now() - timedelta(days=days + 20)).strftime('%Y-%m-%d')
-            rs = bs.query_history_k_data_plus(
-                bs_code, 'date,open,high,low,close,volume,amount,turn,pctChg',
-                start_date=start, end_date=end, frequency='d', adjustflag='2')
-            if rs.error_code == '0':
-                data = []
-                while rs.next():
-                    data.append(rs.get_row_data())
-                bs.logout()
-                if data:
-                    df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
-                    for c in ['open','high','low','close','volume','amount','turn','pctChg']:
-                        df[c] = pd.to_numeric(df[c], errors='coerce')
-                    result_queue.put(df.dropna(subset=['close']))
-                    return
-            bs.logout()
-            result_queue.put(None)
-        except:
-            try: bs.logout()
-            except: pass
-            result_queue.put(None)
-
-    t = threading.Thread(target=_fetch, daemon=True)
-    t.start()
     try:
-        result = result_queue.get(timeout=15)
-        if result is not None and len(result) >= 60:
-            return result
-    except queue.Empty:
-        pass
+        lg = bs.login()
+        if lg.error_code != '0':
+            print('  Baostock login failed, falling back to AKShare')
+            bs.logout()
+            # Fallback: individual AKShare calls
+            for code in codes:
+                df = _fetch_akshare_kline(code, days)
+                if not df.empty: results[code] = df
+            return results
 
-    # AKShare fallback
+        for code in codes:
+            try:
+                bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
+                rs = bs.query_history_k_data_plus(
+                    bs_code, 'date,open,high,low,close,volume,amount,turn,pctChg',
+                    start_date=start, end_date=end, frequency='d', adjustflag='2')
+                if rs.error_code == '0':
+                    data = []
+                    while rs.next():
+                        data.append(rs.get_row_data())
+                    if data:
+                        df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
+                        for c in ['open','high','low','close','volume','amount','turn','pctChg']:
+                            df[c] = pd.to_numeric(df[c], errors='coerce')
+                        df = df.dropna(subset=['close'])
+                        if len(df) >= 60:
+                            results[code] = df
+            except (OSError, ConnectionError, ConnectionResetError) as e:
+                # Socket error - re-login and retry
+                try: bs.logout()
+                except: pass
+                time.sleep(1)
+                try:
+                    bs.login()
+                    bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
+                    rs = bs.query_history_k_data_plus(
+                        bs_code, 'date,open,high,low,close,volume,amount,turn,pctChg',
+                        start_date=start, end_date=end, frequency='d', adjustflag='2')
+                    if rs.error_code == '0':
+                        data = []
+                        while rs.next():
+                            data.append(rs.get_row_data())
+                        if data:
+                            df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
+                            for c in ['open','high','low','close','volume','amount','turn','pctChg']:
+                                df[c] = pd.to_numeric(df[c], errors='coerce')
+                            df = df.dropna(subset=['close'])
+                            if len(df) >= 60:
+                                results[code] = df
+                except:
+                    df = _fetch_akshare_kline(code, days)
+                    if not df.empty: results[code] = df
+            except Exception:
+                df = _fetch_akshare_kline(code, days)
+                if not df.empty: results[code] = df
+
+        bs.logout()
+    except Exception as e:
+        print(f'  Baostock batch failed: {e}')
+        try: bs.logout()
+        except: pass
+        # Fallback for all
+        for code in codes:
+            df = _fetch_akshare_kline(code, days)
+            if not df.empty: results[code] = df
+
+    return results
+
+
+def _fetch_akshare_kline(code, days):
+    """AKShare K-line fallback"""
     try:
         import akshare as ak
         prefix = 'sh' + code if code.startswith('6') else 'sz' + code
@@ -125,8 +161,7 @@ def fetch_kline(code, days=TRAINING_DAYS):
             for c_map in [{'日期':'date','开盘':'open','最高':'high','最低':'low','收盘':'close','成交量':'volume','成交额':'amount','换手率':'turn'},
                           {'date':'date','open':'open','high':'high','low':'low','close':'close','volume':'volume','amount':'amount','turn':'turn'}]:
                 rename = {k:v for k,v in c_map.items() if k in df.columns}
-                if rename:
-                    return df.rename(columns=rename)
+                if rename: return df.rename(columns=rename)
     except:
         pass
     return pd.DataFrame()
@@ -364,25 +399,30 @@ def full_train():
     all_codes = sorted(set(all_codes))
     print(f'  总计: {len(all_codes)} 只个股待训练')
 
-    # Step 2: Fetch K-line data
-    print(f'\n[2/4] 获取{TRAINING_DAYS}天K线数据...')
+    # Step 2: Fetch K-line data in batches
+    print(f'\n[2/4] 获取{TRAINING_DAYS}天K线数据 (批量模式)...')
     all_features, all_labels = [], []
     trained = 0
     failed = 0
+    batch_size = 40  # fetch 40 stocks per batch to avoid socket issues
 
-    for i, code in enumerate(all_codes):
-        if i % 20 == 0:
-            print(f'  进度: {i}/{len(all_codes)} ({trained}只成功, {failed}只失败, {len(all_features)}条特征)')
-        df = fetch_kline(code, TRAINING_DAYS)
-        if df.empty or len(df) < 80:
-            failed += 1; continue
-        feats, lbls = extract_features(df)
-        if feats:
-            all_features.extend(feats)
-            all_labels.extend(lbls)
-            trained += 1
-        else:
-            failed += 1
+    for batch_start in range(0, len(all_codes), batch_size):
+        batch_codes = all_codes[batch_start:batch_start + batch_size]
+        print(f'  批次 [{batch_start//batch_size+1}/{(len(all_codes)-1)//batch_size+1}]: {len(batch_codes)}只...')
+        kline_data = fetch_kline_batch(batch_codes, TRAINING_DAYS)
+        for code in batch_codes:
+            df = kline_data.get(code)
+            if df is not None and not df.empty and len(df) >= 80:
+                feats, lbls = extract_features(df)
+                if feats:
+                    all_features.extend(feats)
+                    all_labels.extend(lbls)
+                    trained += 1
+                else:
+                    failed += 1
+            else:
+                failed += 1
+        print(f'    累计: {trained}只成功, {failed}只失败, {len(all_features)}条特征')
 
     print(f'  完成: {trained}只成功, {failed}只失败, 总计{len(all_features)}条特征')
 
@@ -424,16 +464,16 @@ def daily_learn():
     codes = limit_df['代码'].astype(str).str.strip().tolist()
     print(f'  涨停: {len(codes)}只')
 
-    # Get 100 days of data for today's stocks
-    print(f'\n[2/3] 获取100天K线...')
+    # Get 100 days of data for today's stocks (batch mode)
+    print(f'\n[2/3] 获取100天K线 (批量)...')
     all_features, all_labels = [], []
     trained = 0
+    kline_data = fetch_kline_batch(codes[:60], 100)
     for code in codes[:60]:
-        df = fetch_kline(code, 100)
-        if not df.empty and len(df) >= 60:
+        df = kline_data.get(code)
+        if df is not None and not df.empty and len(df) >= 60:
             feats, lbls = extract_features(df)
             if feats: all_features.extend(feats); all_labels.extend(lbls); trained += 1
-
     print(f'  获取: {trained}只有效, {len(all_features)}条特征')
 
     if len(all_features) < 100:
