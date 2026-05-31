@@ -1372,97 +1372,127 @@ class StockAnalyzer:
         '房地产', '新能源汽车', '新能源车', '消费概念', '大消费'
     ]
 
-    def train_on_concept_data(self):
-        """用涨停池中现有个股的历史数据训练量化模型（高效版）"""
-        track = self._load_quant_tracker()
+    def _extract_features_from_stock(self, code, days=180):
+        """从单只个股K线提取训练特征"""
+        prefix = 'sh' + code if code.startswith('6') else 'sz' + code
+        df = StockAnalyzer.fetch_stock_history(prefix, days)
+        if df is None or df.empty or len(df) < 65:
+            return [], []
 
-        # Use today's limit-up pool stocks
-        limit_df = self.fetch_limit_up_pool(self.today_str)
-        if limit_df.empty:
-            return {'status': 'insufficient', 'samples': 0, 'concepts_trained': 0,
-                    'message': '今日无涨停数据，无法训练'}
+        close = np.array(df['close'].values, dtype=float).flatten()
+        raw_vol = df.get('volume', df.get('成交量'))
+        if raw_vol is None: return [], []
+        vol = np.array(raw_vol.values, dtype=float).flatten() if hasattr(raw_vol, 'values') else np.array(raw_vol, dtype=float).flatten()
+        if len(vol) != len(close): vol = np.ones(len(close))
 
-        codes = limit_df['代码'].astype(str).str.strip().tolist()
-        all_features, all_labels = [], []
-        trained_stocks = 0
+        features, labels = [], []
+        for i in range(60, len(close) - 1):
+            window = close[i-60:i]
+            if len(window) < 20: continue
+            ma5 = float(np.mean(window[-5:]))
+            ma20 = float(np.mean(window[-20:]))
+            ret_5d = float((close[i] - close[i-5]) / (close[i-5] + 1e-9) * 100)
+            ret_20d = float((close[i] - close[i-20]) / (close[i-20] + 1e-9) * 100)
+            avg_vol = float(np.mean(vol[max(0,i-20):i+1]))
+            vol_ratio = float(vol[i] / (avg_vol + 1e-9))
+            trend = 1 if ma5 > ma20 else -1
+            vola = float(np.std(window[-20:]) / (np.mean(window[-20:]) + 1e-9) * 100)
+            features.append([ret_5d, ret_20d, vol_ratio, trend,
+                             float((close[i] - ma20) / (ma20 + 1e-9) * 100), vola])
+            next_ret = float((close[i+1] - close[i]) / (close[i] + 1e-9) * 100)
+            labels.append(1 if next_ret > 0 else 0)
+        return features, labels
 
-        for idx, code in enumerate(codes[:80]):  # max 80 stocks
-            try:
-                prefix = 'sh' + code if code.startswith('6') else 'sz' + code
-                df = StockAnalyzer.fetch_stock_history(prefix, 180)
-                if df is None or df.empty or len(df) < 65:
-                    continue
-                trained_stocks += 1
-
-                close = np.array(df['close'].values, dtype=float).flatten()
-                vol = np.array(df.get('volume', df.get('成交量', [0])).values if hasattr(df.get('volume', df.get('成交量', [0])), 'values') else np.array(df.get('volume', df.get('成交量', [0])), dtype=float)).flatten()
-
-                for i in range(60, len(close) - 1):
-                    window = close[i-60:i]
-                    if len(window) < 20: continue
-
-                    ma5 = float(np.mean(window[-5:]))
-                    ma20 = float(np.mean(window[-20:]))
-                    ret_5d = float((close[i] - close[i-5]) / close[i-5] * 100) if close[i-5] > 0 else 0
-                    ret_20d = float((close[i] - close[i-20]) / close[i-20] * 100) if close[i-20] > 0 else 0
-                    avg_vol = float(np.mean(vol[max(0,i-20):i+1])) if len(vol) > i else 1
-                    vol_ratio = float(vol[i] / (avg_vol + 1e-9))
-                    trend = 1 if ma5 > ma20 else -1
-                    vola = float(np.std(window[-20:]) / (np.mean(window[-20:]) + 1e-9) * 100)
-
-                    all_features.append([ret_5d, ret_20d, vol_ratio, trend,
-                                         float((close[i] - ma20) / (ma20 + 1e-9) * 100), vola])
-                    next_ret = float((close[i+1] - close[i]) / (close[i] + 1e-9) * 100)
-                    all_labels.append(1 if next_ret > 0 else 0)
-
-                if idx % 20 == 0:
-                    print(f'[train] processed {trained_stocks} stocks...')
-            except:
-                continue
-
+    def _train_lightgbm(self, all_features, all_labels, trained_stocks,
+                        is_incremental=False, prev_samples=0):
+        """训练LightGBM模型"""
         if len(all_features) < 100:
             return {'status': 'insufficient', 'samples': len(all_features),
-                    'concepts_trained': trained_stocks,
-                    'message': f'训练数据不足（仅{len(all_features)}条，{trained_stocks}只股票），请等涨停日积累更多数据'}
+                    'stocks_used': trained_stocks,
+                    'message': f'数据不足（仅{len(all_features)}条），需要更多数据'}
 
         X = np.array(all_features, dtype=float)
         y = np.array(all_labels, dtype=int)
 
-        try:
-            from lightgbm import LGBMClassifier
-            split = int(len(X) * 0.8)
-            X_tr, X_te = X[:split], X[split:]
-            y_tr, y_te = y[:split], y[split:]
+        from lightgbm import LGBMClassifier
+        split = int(len(X) * 0.8)
+        X_tr, X_te = X[:split], X[split:]
+        y_tr, y_te = y[:split], y[split:]
 
-            model = LGBMClassifier(n_estimators=120, learning_rate=0.03, num_leaves=20,
-                                   max_depth=6, random_state=42, verbose=-1)
-            model.fit(X_tr, y_tr)
-            acc = float(model.score(X_te, y_te))
-            importance = model.feature_importances_
-            # Save trained model params
-            track = self._load_quant_tracker()
-            track['ml_model'] = {
-                'trained_date': self.today_str,
-                'accuracy': round(acc, 3),
-                'samples': len(all_features),
-                'stocks_used': trained_stocks,
-                'feature_names': ['5日涨幅', '20日涨幅', '量比', '趋势方向', '距均线', '波动率'],
-                'feature_importance': importance.tolist() if hasattr(importance, 'tolist') else list(importance),
-                'model_type': 'LightGBM'
-            }
-            self._save_quant_tracker(track)
+        model = LGBMClassifier(n_estimators=120, learning_rate=0.03, num_leaves=20,
+                               max_depth=6, random_state=42, verbose=-1)
+        model.fit(X_tr, y_tr)
+        acc = float(model.score(X_te, y_te))
+        importance = model.feature_importances_
+        track = self._load_quant_tracker()
+        total_samples = prev_samples + len(all_features) if is_incremental else len(all_features)
+        rounds = track.get('ml_model', {}).get('train_rounds', 0) + 1
+        track['ml_model'] = {
+            'trained_date': self.today_str, 'accuracy': round(acc, 3),
+            'samples': total_samples, 'stocks_used': trained_stocks,
+            'is_incremental': is_incremental, 'train_rounds': rounds,
+            'feature_names': ['5日涨幅', '20日涨幅', '量比', '趋势方向', '距均线', '波动率'],
+            'feature_importance': [round(float(v), 4) for v in importance],
+            'model_type': 'LightGBM'
+        }
+        self._save_quant_tracker(track)
 
-            return {
-                'status': 'success', 'accuracy': round(acc, 3),
-                'samples': len(all_features), 'concepts_trained': trained_stocks,
-                'train_samples': len(X_tr), 'test_samples': len(X_te),
-                'feature_importance': dict(zip(
-                    ['5日涨幅', '20日涨幅', '量比', '趋势方向', '距均线', '波动率'],
-                    [round(float(v), 3) for v in importance])),
-                'message': f'训练完成！准确率{acc:.1%}，基于{trained_stocks}只个股的{len(all_features)}条历史数据'
-            }
-        except Exception as e:
-            return {'status': 'error', 'message': str(e), 'samples': len(all_features)}
+        msg = f'{"增量" if is_incremental else "初始"}训练完成！准确率{acc:.1%} | {trained_stocks}只 × 约{len(all_features)//max(1,trained_stocks)}条 = {len(all_features)}条'
+        if is_incremental: msg += f'（累计{total_samples}条）'
+
+        return {
+            'status': 'success', 'accuracy': round(acc, 3), 'samples': len(all_features),
+            'stocks_used': trained_stocks, 'total_samples': total_samples,
+            'train_samples': len(X_tr), 'test_samples': len(X_te),
+            'is_incremental': is_incremental, 'train_rounds': rounds,
+            'feature_importance': dict(zip(
+                ['5日涨幅', '20日涨幅', '量比', '趋势方向', '距均线', '波动率'],
+                [round(float(v), 3) for v in importance])),
+            'message': msg
+        }
+
+    def train_on_concept_data(self):
+        """初次训练：用涨停池个股180天数据"""
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        if limit_df.empty:
+            return {'status': 'insufficient', 'samples': 0,
+                    'message': '今日无涨停数据，无法训练'}
+        codes = limit_df['代码'].astype(str).str.strip().tolist()
+        all_features, all_labels, trained = [], [], 0
+        for code in codes[:80]:
+            feats, lbls = self._extract_features_from_stock(code, 180)
+            if feats: all_features.extend(feats); all_labels.extend(lbls); trained += 1
+        return self._train_lightgbm(all_features, all_labels, trained, is_incremental=False)
+
+    def incremental_train(self):
+        """增量训练：在已有模型上用非涨停个股100天数据进一步训练"""
+        track = self._load_quant_tracker()
+        prev = track.get('ml_model', {})
+        prev_samples = prev.get('samples', 0)
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        limit_codes = set(limit_df['代码'].astype(str).str.strip().tolist()) if not limit_df.empty else set()
+
+        # Get additional stocks from concept constituents
+        add_codes = set()
+        for concept in self.TRACKED_CONCEPTS[:10]:
+            try:
+                cons = StockAnalyzer.fetch_concept_constituents(concept)
+                if cons is not None and not cons.empty and '代码' in cons.columns:
+                    for c in cons['代码'].astype(str).str.strip().tolist()[:15]:
+                        if c not in limit_codes: add_codes.add(c)
+            except: continue
+        if not add_codes:
+            return {'status': 'insufficient', 'samples': 0,
+                    'message': '未找到可用的非涨停概念成分股，请确认网络连通'}
+        all_features, all_labels, trained = [], [], 0
+        for code in list(add_codes)[:50]:
+            feats, lbls = self._extract_features_from_stock(code, 100)
+            if feats: all_features.extend(feats); all_labels.extend(lbls); trained += 1
+        if len(all_features) < 50:
+            return {'status': 'insufficient', 'samples': len(all_features),
+                    'message': f'非涨停概念股数据不足（仅{len(all_features)}条）'}
+        return self._train_lightgbm(all_features, all_labels, trained,
+                                    is_incremental=True, prev_samples=prev_samples)
 
     def quant_predict_sectors(self):
         """量化模型预测板块明日表现 — 基于多因子评分，追踪指定概念"""
@@ -2743,18 +2773,27 @@ def render_tab_quant(analyzer, today_str):
     st.subheader('量化多因子预测模型')
 
     # ---- Model Training Section ----
-    with st.expander('模型训练（基于涨停股180天价格数据）', expanded=False):
-        st.caption('使用今日涨停池中个股的180天K线数据训练LightGBM模型')
+    with st.expander('模型训练（基于概念板块价格数据）', expanded=False):
         col_tr1, col_tr2 = st.columns([2, 1])
         with col_tr1:
-            if st.button('开始训练模型', use_container_width=True, type='primary', key='btn_train_ml'):
-                with st.spinner('正在获取涨停股180天价格数据并训练...'):
-                    train_result = analyzer.train_on_concept_data()
-                st.session_state['train_result'] = train_result
+            btn1, btn2 = st.columns(2)
+            with btn1:
+                if st.button('初始训练（涨停股180天）', use_container_width=True, key='btn_train_ml'):
+                    with st.spinner('正在获取涨停股180天数据并训练...'):
+                        train_result = analyzer.train_on_concept_data()
+                    st.session_state['train_result'] = train_result
+            with btn2:
+                if st.button('增量训练（概念股100天）', use_container_width=True, key='btn_train_inc'):
+                    with st.spinner('正在获取概念板块成分股100天数据增量训练...'):
+                        train_result = analyzer.incremental_train()
+                    st.session_state['train_result'] = train_result
+
             train_result = st.session_state.get('train_result')
             if train_result:
                 if train_result['status'] == 'success':
                     st.success(f"✅ {train_result['message']}")
+                    if train_result.get('is_incremental'):
+                        st.info(f'累计样本: {train_result.get("total_samples", 0)}条 | 训练轮次: {train_result.get("train_rounds", 0)}')
                     fi = train_result.get('feature_importance', {})
                     if fi:
                         import plotly.graph_objects as go
@@ -2770,9 +2809,12 @@ def render_tab_quant(analyzer, today_str):
                     st.error(train_result.get('message', '训练失败'))
         with col_tr2:
             limit_count = len(StockAnalyzer.fetch_limit_up_pool(today_str))
-            st.metric('可用个股', f'{limit_count}只')
-            st.metric('回溯天数', '180天')
-            st.metric('模型', 'LightGBM')
+            track = analyzer._load_quant_tracker()
+            ml_info = track.get('ml_model', {})
+            st.metric('涨停可用', f'{limit_count}只')
+            st.metric('累计样本', f'{ml_info.get("samples", 0)}条' if ml_info else '未训练')
+            st.metric('训练轮次', ml_info.get('train_rounds', 0) if ml_info else 0)
+            st.metric('当前准确率', f'{ml_info.get("accuracy", 0):.1%}' if ml_info and ml_info.get('accuracy') else '-')
 
     # ---- Sector-level prediction ----
     st.markdown('### 板块量化预测')
