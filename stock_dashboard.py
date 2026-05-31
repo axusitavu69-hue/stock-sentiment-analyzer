@@ -172,7 +172,7 @@ class StockAnalyzer:
             return pd.DataFrame()
 
     @staticmethod
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=7200)
     def fetch_stock_comment():
         import akshare as ak
         try:
@@ -789,7 +789,7 @@ class StockAnalyzer:
     }
 
     @staticmethod
-    @st.cache_data(ttl=600)
+    @st.cache_data(ttl=3600)
     def fetch_lhb_data(date_str):
         """获取龙虎榜数据"""
         import akshare as ak
