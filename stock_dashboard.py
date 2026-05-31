@@ -1533,7 +1533,8 @@ def render_tab_overview(analyzer, today_str):
     st.subheader('今日涨停板明细')
     if not limit_df.empty:
         sc = [c for c in ['代码','名称','涨停时间','连板数','封板资金','换手率','所属行业','炸板次数'] if c in limit_df.columns]
-        st.dataframe(limit_df[sc].head(100), use_container_width=True, hide_index=True, height=460)
+        st.dataframe(limit_df[sc], use_container_width=True, hide_index=True, height=600)
+        st.caption(f'共 {len(limit_df)} 只涨停')
     else:
         st.warning('今日无涨停数据')
 
