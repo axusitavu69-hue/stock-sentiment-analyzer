@@ -1465,32 +1465,41 @@ class StockAnalyzer:
         return self._train_lightgbm(all_features, all_labels, trained, is_incremental=False)
 
     def incremental_train(self):
-        """增量训练：在已有模型上用非涨停个股100天数据进一步训练"""
+        """增量训练：在已有模型上用历史涨停池中非今日涨停的个股100天数据"""
         track = self._load_quant_tracker()
         prev = track.get('ml_model', {})
         prev_samples = prev.get('samples', 0)
-        limit_df = self.fetch_limit_up_pool(self.today_str)
-        limit_codes = set(limit_df['代码'].astype(str).str.strip().tolist()) if not limit_df.empty else set()
 
-        # Get additional stocks from concept constituents
+        # Get today's limit-up codes
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        today_codes = set(limit_df['代码'].astype(str).str.strip().tolist()) if not limit_df.empty else set()
+
+        # Use historical limit-up pool samples to find additional stocks
+        samples = StockAnalyzer._sample_historical_zt(self.today_str, min(self.history_days, 180))
         add_codes = set()
-        for concept in self.TRACKED_CONCEPTS[:10]:
-            try:
-                cons = StockAnalyzer.fetch_concept_constituents(concept)
-                if cons is not None and not cons.empty and '代码' in cons.columns:
-                    for c in cons['代码'].astype(str).str.strip().tolist()[:15]:
-                        if c not in limit_codes: add_codes.add(c)
-            except: continue
-        if not add_codes:
+        for s in samples:
+            t_df = s.get('zt')
+            if t_df is None or t_df.empty:
+                continue
+            for _, row in t_df.iterrows():
+                code = str(row.get('代码', '')).strip()
+                if code and code not in today_codes and len(code) == 6:
+                    add_codes.add(code)
+                    if len(add_codes) >= 60: break
+            if len(add_codes) >= 60: break
+
+        if len(add_codes) < 10:
             return {'status': 'insufficient', 'samples': 0,
-                    'message': '未找到可用的非涨停概念成分股，请确认网络连通'}
+                    'message': f'历史数据中仅找到{len(add_codes)}只非今日涨停股，请多积累几天数据'}
+
         all_features, all_labels, trained = [], [], 0
         for code in list(add_codes)[:50]:
             feats, lbls = self._extract_features_from_stock(code, 100)
             if feats: all_features.extend(feats); all_labels.extend(lbls); trained += 1
+
         if len(all_features) < 50:
             return {'status': 'insufficient', 'samples': len(all_features),
-                    'message': f'非涨停概念股数据不足（仅{len(all_features)}条）'}
+                    'message': f'K线数据不足（仅{len(all_features)}条），{trained}只有效'}
         return self._train_lightgbm(all_features, all_labels, trained,
                                     is_incremental=True, prev_samples=prev_samples)
 
