@@ -1278,11 +1278,21 @@ class StockAnalyzer:
         }
         return result, None
 
+    TRACKED_CONCEPTS = [
+        '商业航天', 'PCB', '存储芯片', 'CPO', '共封装光学', '创新药',
+        '算力租赁', '钠离子电池', '光纤', 'AI应用', '先进封装',
+        '人形机器人', '机器人', '绿色电力', '数据中心', 'AIDC',
+        '储能', 'AI芯片', '人工智能芯片', '半导体', '白酒',
+        '房地产', '新能源汽车', '新能源车', '消费概念', '大消费'
+    ]
+
     def quant_predict_sectors(self):
-        """量化模型预测板块明日表现 — 基于多因子评分"""
+        """量化模型预测板块明日表现 — 基于多因子评分，追踪指定概念"""
         limit_df = self.fetch_limit_up_pool(self.today_str)
-        if limit_df.empty or '所属行业' not in limit_df.columns:
+        if limit_df.empty:
             return pd.DataFrame(), '今日无涨停数据'
+
+        has_sector_col = '所属行业' in limit_df.columns
 
         # Build sector features from today's data
         sector_data = {}
@@ -1345,7 +1355,27 @@ class StockAnalyzer:
                 '明日预测': pred, '概率': prob
             })
         df = pd.DataFrame(results).sort_values('量化评分', ascending=False).reset_index(drop=True)
-        return df, f'共 {len(results)} 个板块 | 模型: 5因子加权评分'
+
+        # ---- Force-include tracked concepts ----
+        existing_sectors = set(df['板块'].tolist())
+        for concept in self.TRACKED_CONCEPTS:
+            found = False
+            for es in existing_sectors:
+                if concept in str(es) or str(es) in concept:
+                    found = True; break
+            if not found and concept not in [r['板块'] for r in results]:
+                # Add as cold/untracked
+                results.append({
+                    '板块': f'{concept}*', '涨停数': 0, '最高连板': 0,
+                    '资金趋势': '-', '量化评分': 0, '规模因子': 0, '质量因子': 0,
+                    '动量因子': 0, '资金因子': 0,
+                    '明日预测': '暂无涨停', '概率': '0%'
+                })
+
+        df = pd.DataFrame(results).sort_values('量化评分', ascending=False).reset_index(drop=True)
+        tracked_count = sum(1 for c in self.TRACKED_CONCEPTS if any(c in str(s) or str(s) in c for s in existing_sectors))
+        info = f'共 {len([r for r in results if r["涨停数"] > 0])} 个活跃板块 | 追踪{len(self.TRACKED_CONCEPTS)}个概念中 {tracked_count} 个今日有涨停'
+        return df, info
 
     def quant_predict_stocks(self):
         """量化模型预测所有涨停股明日表现"""
