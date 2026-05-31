@@ -6,32 +6,29 @@ from datetime import datetime, timedelta
 import pandas as pd
 import numpy as np
 
-# 创建不经过代理的 session
-session = requests.Session()
-session.trust_env = False  # 关键：绕过系统代理
-session.headers.update({
-    'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
-    'Referer': 'https://data.eastmoney.com/'
-})
-
-EASTMONEY_HOSTS = [
-    'push2.eastmoney.com', 'push2his.eastmoney.com',
-    'datacenter.eastmoney.com', 'data.eastmoney.com',
-    '79.push2.eastmoney.com', '17.push2.eastmoney.com',
-    '83.push2.eastmoney.com', '54.push2.eastmoney.com'
-]
+def _create_session():
+    """使用系统代理（AKShare也是走代理才通的）"""
+    s = requests.Session()
+    # 不修改trust_env/proxies，让requests自动使用系统代理
+    s.headers.update({
+        'User-Agent': 'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36',
+        'Referer': 'https://data.eastmoney.com/'
+    })
+    return s
 
 
 def _get(url, params=None, retry=2):
     """带重试的HTTP GET"""
+    s = _create_session()
     for attempt in range(retry + 1):
         try:
-            resp = session.get(url, params=params, timeout=10)
+            resp = s.get(url, params=params, timeout=10)
             if resp.status_code == 200:
                 return resp
         except Exception as e:
             if attempt < retry:
                 time.sleep(1)
+                s = _create_session()  # 重建session
                 continue
             raise
     return None
@@ -80,52 +77,52 @@ def get_limit_up_pool(date_str=None):
 
 
 def get_kline(code, market='sz', days=300):
-    """个股日K线 — 原生东财API"""
-    secid = f'0.{code}' if code.startswith('6') else f'1.{code}'
-    if market == 'sh' or code.startswith('6'):
-        secid = f'1.{code}'
+    """个股日K线 — Baostock 主源，稳定可靠"""
+    import baostock as bs
+    import threading, queue
 
-    end = datetime.now().strftime('%Y%m%d')
-    start = (datetime.now() - timedelta(days=days + 20)).strftime('%Y%m%d')
+    bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
+    end = datetime.now().strftime('%Y-%m-%d')
+    start = (datetime.now() - timedelta(days=days + 30)).strftime('%Y-%m-%d')
 
-    url = 'https://push2his.eastmoney.com/api/qt/stock/kline/get'
-    params = {
-        'secid': secid,
-        'fields1': 'f1,f2,f3,f4,f5,f6',
-        'fields2': 'f51,f52,f53,f54,f55,f56,f57,f58,f59,f60,f61',
-        'klt': '101',  # daily
-        'fqt': '1',   # 前复权
-        'beg': start, 'end': end,
-        'lmt': '500',
-        '_': str(int(time.time() * 1000))
-    }
-    resp = _get(url, params)
-    if resp is None: return pd.DataFrame()
+    result_queue = queue.Queue()
 
-    data = resp.json().get('data')
-    if data is None: return pd.DataFrame()
+    def _fetch():
+        try:
+            bs.login()
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                'date,open,high,low,close,volume,amount,turn,pctChg',
+                start_date=start, end_date=end,
+                frequency='d', adjustflag='2')
+            if rs.error_code == '0':
+                data = []
+                while rs.next():
+                    data.append(rs.get_row_data())
+                if data:
+                    df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
+                    for c in ['open','high','low','close','volume','amount','turn','pctChg']:
+                        df[c] = pd.to_numeric(df[c], errors='coerce')
+                    result_queue.put(df.dropna(subset=['close']))
+                    bs.logout()
+                    return
+            bs.logout()
+            result_queue.put(None)
+        except Exception:
+            try: bs.logout()
+            except: pass
+            result_queue.put(None)
 
-    klines = data.get('klines', [])
-    if not klines: return pd.DataFrame()
+    t = threading.Thread(target=_fetch, daemon=True)
+    t.start()
+    try:
+        result = result_queue.get(timeout=12)
+        if result is not None and len(result) >= 40:
+            return result
+    except queue.Empty:
+        pass
 
-    rows = []
-    for line in klines:
-        parts = line.split(',')
-        if len(parts) >= 11:
-            rows.append({
-                'date': parts[0],
-                'open': float(parts[1]),
-                'close': float(parts[2]),
-                'high': float(parts[3]),
-                'low': float(parts[4]),
-                'volume': float(parts[5]),
-                'amount': float(parts[6]),
-                'amplitude': float(parts[7]),
-                'pctChg': float(parts[8]),
-                'chg': float(parts[9]),
-                'turnover': float(parts[10])
-            })
-    return pd.DataFrame(rows)
+    return pd.DataFrame()
 
 
 def get_concept_fund_flow():
