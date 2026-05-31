@@ -29,7 +29,7 @@ warnings.filterwarnings('ignore')
 TRAINING_DAYS   = 365          # 改为1年
 TARGET_STOCKS   = 2500         # 目标股票数
 BATCH_SIZE      = 50           # 并发批次大小（每批最多同时发50个请求）
-MAX_WORKERS     = 10           # 并发线程数（东财API建议≤10，防封）
+MAX_WORKERS     = 2            # Baostock不宜高并发，2个线程最稳
 CACHE_DIR       = "kline_cache"  # K线本地缓存目录
 MODEL_DIR       = "stock_reports"
 QUANT_TRACKER   = f"{MODEL_DIR}/quant_tracker.json"
