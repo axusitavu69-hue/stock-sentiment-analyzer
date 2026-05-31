@@ -1465,7 +1465,7 @@ class StockAnalyzer:
         return self._train_lightgbm(all_features, all_labels, trained, is_incremental=False)
 
     def incremental_train(self):
-        """增量训练：在已有模型上用历史涨停池中非今日涨停的个股100天数据"""
+        """增量训练：调用API获取概念板块成分股100天数据进行增量训练"""
         track = self._load_quant_tracker()
         prev = track.get('ml_model', {})
         prev_samples = prev.get('samples', 0)
@@ -1474,32 +1474,48 @@ class StockAnalyzer:
         limit_df = self.fetch_limit_up_pool(self.today_str)
         today_codes = set(limit_df['代码'].astype(str).str.strip().tolist()) if not limit_df.empty else set()
 
-        # Use historical limit-up pool samples to find additional stocks
-        samples = StockAnalyzer._sample_historical_zt(self.today_str, min(self.history_days, 180))
+        # Get all concept names from East Money for fuzzy matching
+        all_concept_names = set()
+        try:
+            cf_df = StockAnalyzer.fetch_concept_fund_flow('即时')
+            if not cf_df.empty and '行业' in cf_df.columns:
+                all_concept_names = set(cf_df['行业'].tolist())
+        except:
+            pass
+
+        # Match tracked concepts to actual concept names
         add_codes = set()
-        for s in samples:
-            t_df = s.get('zt')
-            if t_df is None or t_df.empty:
-                continue
-            for _, row in t_df.iterrows():
-                code = str(row.get('代码', '')).strip()
-                if code and code not in today_codes and len(code) == 6:
-                    add_codes.add(code)
-                    if len(add_codes) >= 60: break
-            if len(add_codes) >= 60: break
+        for tracked in self.TRACKED_CONCEPTS[:15]:
+            matched = []
+            for real_name in all_concept_names:
+                if tracked in str(real_name) or str(real_name) in tracked:
+                    matched.append(real_name)
+            if not matched:
+                for real_name in all_concept_names:
+                    if any(term in str(real_name) for term in tracked.replace('概念','').replace('(','').replace(')','').split()):
+                        matched.append(real_name)
+            for m in matched[:3]:  # max 3 matches per tracked concept
+                try:
+                    cons = StockAnalyzer.fetch_concept_constituents(m)
+                    if cons is not None and not cons.empty:
+                        for c in cons['代码'].astype(str).str.zfill(6).str.strip().tolist()[:15]:
+                            if c not in today_codes:
+                                add_codes.add(c)
+                except:
+                    continue
 
         if len(add_codes) < 10:
             return {'status': 'insufficient', 'samples': 0,
-                    'message': f'历史数据中仅找到{len(add_codes)}只非今日涨停股，请多积累几天数据'}
+                    'message': f'API仅获取到{len(add_codes)}只概念成分股，请确认网络或等交易日再试'}
 
         all_features, all_labels, trained = [], [], 0
-        for code in list(add_codes)[:50]:
+        for code in list(add_codes)[:60]:
             feats, lbls = self._extract_features_from_stock(code, 100)
             if feats: all_features.extend(feats); all_labels.extend(lbls); trained += 1
 
-        if len(all_features) < 50:
+        if len(all_features) < 100:
             return {'status': 'insufficient', 'samples': len(all_features),
-                    'message': f'K线数据不足（仅{len(all_features)}条），{trained}只有效'}
+                    'message': f'K线数据不足（{trained}只有效K线/{len(all_features)}条），请等更多交易日'}
         return self._train_lightgbm(all_features, all_labels, trained,
                                     is_incremental=True, prev_samples=prev_samples)
 
