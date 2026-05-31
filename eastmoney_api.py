@@ -77,17 +77,14 @@ def get_limit_up_pool(date_str=None):
 
 
 def get_kline(code, market='sz', days=300):
-    """个股日K线 — Baostock 主源，稳定可靠"""
+    """个股日K线 — Baostock + 重试"""
     import baostock as bs
-    import threading, queue
 
     bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
     end = datetime.now().strftime('%Y-%m-%d')
     start = (datetime.now() - timedelta(days=days + 30)).strftime('%Y-%m-%d')
 
-    result_queue = queue.Queue()
-
-    def _fetch():
+    for attempt in range(3):
         try:
             bs.login()
             rs = bs.query_history_k_data_plus(
@@ -97,30 +94,29 @@ def get_kline(code, market='sz', days=300):
                 frequency='d', adjustflag='2')
             if rs.error_code == '0':
                 data = []
-                while rs.next():
-                    data.append(rs.get_row_data())
-                if data:
+                while True:
+                    try:
+                        if not rs.next(): break
+                        data.append(rs.get_row_data())
+                    except:
+                        break
+                bs.logout()
+                if data and len(data) >= 40:
                     df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
                     for c in ['open','high','low','close','volume','amount','turn','pctChg']:
                         df[c] = pd.to_numeric(df[c], errors='coerce')
-                    result_queue.put(df.dropna(subset=['close']))
-                    bs.logout()
-                    return
+                    return df.dropna(subset=['close'])
             bs.logout()
-            result_queue.put(None)
+        except (OSError, ConnectionError, ConnectionResetError) as e:
+            try: bs.logout()
+            except: pass
+            if attempt < 2:
+                time.sleep(2 * (attempt + 1))
+                continue
         except Exception:
             try: bs.logout()
             except: pass
-            result_queue.put(None)
-
-    t = threading.Thread(target=_fetch, daemon=True)
-    t.start()
-    try:
-        result = result_queue.get(timeout=12)
-        if result is not None and len(result) >= 40:
-            return result
-    except queue.Empty:
-        pass
+            break
 
     return pd.DataFrame()
 
