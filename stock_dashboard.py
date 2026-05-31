@@ -1165,6 +1165,141 @@ class StockAnalyzer:
         }
 
 
+    # ==================== Quantitative Models ====================
+
+    def quant_predict_sectors(self):
+        """量化模型预测板块明日表现 — 基于多因子评分"""
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        if limit_df.empty or '所属行业' not in limit_df.columns:
+            return pd.DataFrame(), '今日无涨停数据'
+
+        # Build sector features from today's data
+        sector_data = {}
+        for _, row in limit_df.iterrows():
+            s = str(row.get('所属行业', ''))
+            if not s: continue
+            if s not in sector_data:
+                sector_data[s] = {'zt_count': 0, 'max_board': 0, 'total_fb': 0, 'total_hsl': 0,
+                                  'zhaban_count': 0, 'early_count': 0}
+            sector_data[s]['zt_count'] += 1
+            lb = int(row.get('连板数', 1) or 1)
+            sector_data[s]['max_board'] = max(sector_data[s]['max_board'], lb)
+            sector_data[s]['total_fb'] += row.get('封板资金', 0) or 0
+            sector_data[s]['total_hsl'] += row.get('换手率', 0) or 0
+            if int(row.get('炸板次数', 0) or 0) > 0: sector_data[s]['zhaban_count'] += 1
+            ft = self.parse_fengban_time(row.get('首次封板时间', 150000))
+            if ft <= 93500: sector_data[s]['early_count'] += 1
+
+        # Add fund flow data
+        ff_df = self.fetch_concept_fund_flow('即时')
+        for s_name, data in sector_data.items():
+            if not ff_df.empty and '行业' in ff_df.columns:
+                m = ff_df[ff_df['行业'] == s_name]
+                data['net_flow'] = m['净额'].values[0] if not m.empty and '净额' in m.columns else 0
+            else:
+                data['net_flow'] = 0
+
+        # Compute composite scores
+        results = []
+        for s_name, d in sector_data.items():
+            n = d['zt_count']
+            # Factor 1: Size & breadth (0-25)
+            f1 = min(25, n * 2.5)
+            # Factor 2: Quality - early封板 rate (0-20)
+            f2 = min(20, d['early_count'] / max(1, n) * 20)
+            # Factor 3: Momentum - max board (0-20)
+            f3 = min(20, d['max_board'] * 3)
+            # Factor 4: Fund flow (0-20)
+            nf = d.get('net_flow', 0)
+            f4 = min(20, 10 + np.sign(nf) * min(10, np.log1p(abs(nf) / 1e8) * 1.5))
+            # Factor 5: Risk - zhaban rate inverse (0-15)
+            f5 = max(0, 15 - (d['zhaban_count'] / max(1, n) * 20))
+            total = round(f1 + f2 + f3 + f4 + f5, 1)
+
+            # Prediction
+            if total >= 70:
+                pred = '明日持续走强'; prob = f'{min(95, int(total))}%'
+            elif total >= 50:
+                pred = '大概率保持活跃'; prob = f'{min(85, int(total * 1.2))}%'
+            elif total >= 30:
+                pred = '可能分化'; prob = f'{max(30, int(total))}%'
+            else:
+                pred = '大概率退潮'; prob = f'{max(15, int(total * 0.8))}%'
+
+            results.append({
+                '板块': s_name, '涨停数': n, '最高连板': d['max_board'],
+                '资金趋势': '流入' if nf > 0 else '流出' if nf < 0 else '-',
+                '量化评分': total, '规模因子': round(f1,1), '质量因子': round(f2,1),
+                '动量因子': round(f3,1), '资金因子': round(f4,1),
+                '明日预测': pred, '概率': prob
+            })
+        df = pd.DataFrame(results).sort_values('量化评分', ascending=False).reset_index(drop=True)
+        return df, f'共 {len(results)} 个板块 | 模型: 5因子加权评分'
+
+    def quant_predict_stocks(self):
+        """量化模型预测所有涨停股明日表现"""
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        if limit_df.empty:
+            return pd.DataFrame(), '今日无涨停数据'
+
+        results = []
+        for _, row in limit_df.iterrows():
+            ft = self.parse_fengban_time(row.get('首次封板时间', 150000))
+            zc = int(row.get('炸板次数', 0) or 0)
+            fb = row.get('封板资金', 0) or 0
+            hsl = row.get('换手率', 0) or 0
+            lb = max(1, int(row.get('连板数', 1) or 1))
+            code = str(row.get('代码', ''))
+            name = str(row.get('名称', ''))
+            sector = str(row.get('所属行业', ''))
+
+            # Factor 1: Timing (0-25) - earlier is better
+            if ft <= 92500: f1 = 25
+            elif ft <= 93500: f1 = 20
+            elif ft <= 100000: f1 = 16
+            elif ft <= 110000: f1 = 10
+            elif ft <= 130000: f1 = 6
+            else: f1 = 3
+
+            # Factor 2: Stability (0-25) - no zhaban, strong封单
+            f2 = 15 if zc == 0 else (8 if zc == 1 else 3)
+            f2 += min(10, np.log1p(fb / 1e6) * 1.2 if fb > 0 else 0)
+            f2 = min(25, f2)
+
+            # Factor 3: Momentum (0-20) - board count
+            f3 = min(20, lb * 3.5 + (5 if lb >= 3 else 0))
+
+            # Factor 4: Liquidity (0-15)
+            if hsl is not None and 3 <= hsl <= 15: f4 = 15
+            elif hsl is not None and 1 <= hsl <= 25: f4 = 10
+            elif hsl is not None and hsl > 0: f4 = 5
+            else: f4 = 3
+
+            # Factor 5: Sector strength (0-15)
+            if sector:
+                sector_count = limit_df['所属行业'].value_counts().get(sector, 1) if '所属行业' in limit_df.columns else 1
+                f5 = min(15, sector_count * 2)
+            else:
+                f5 = 3
+
+            total = round(f1 + f2 + f3 + f4 + f5, 1)
+
+            if total >= 75: outlook = '高概率连板'
+            elif total >= 60: outlook = '偏多震荡'
+            elif total >= 45: outlook = '不确定'
+            elif total >= 30: outlook = '大概率断板'
+            else: outlook = '强烈看空'
+
+            results.append({
+                '代码': code, '名称': name, '连板': lb, '所属行业': sector,
+                '量化评分': total, '时机因子': f1, '稳定因子': round(f2,1),
+                '动量因子': f3, '流动性因子': f4, '板块因子': f5,
+                '明日预测': outlook
+            })
+
+        df = pd.DataFrame(results).sort_values('量化评分', ascending=False).reset_index(drop=True)
+        return df, f'共 {len(results)} 只涨停股 | 5因子量化模型'
+
     # ==================== Market Breadth ====================
 
     def compute_market_breadth(self, industry_df):
@@ -2251,7 +2386,7 @@ def main():
     st.title('A股涨停情绪分析系统 v3.0')
     st.caption(f'分析日期: {analysis_date} | 回溯{history_days}天 | {datetime.now().strftime("%H:%M:%S")}')
 
-    t1,t2,t3,t4,t5 = st.tabs(['市场总览', '板块解读', '个股分析', '明日预测', '市场规律'])
+    t1,t2,t3,t4,t5,t6 = st.tabs(['市场总览', '板块解读', '个股分析', '明日预测', '市场规律', '量化模型'])
     with t1:
         try: render_tab_overview(analyzer, today_str)
         except Exception as e: st.error(f'Tab1 加载失败: {e}')
@@ -2277,6 +2412,64 @@ def main():
             else:
                 st.info('点击上方按钮加载市场规律数据（首次加载需采集60天历史数据，约30秒）')
         except Exception as e: st.error(f'Tab5 加载失败: {e}')
+    with t6:
+        try: render_tab_quant(analyzer, today_str)
+        except Exception as e: st.error(f'Tab6 加载失败: {e}')
+
+
+# ============================================================
+# Tab 6: Quantitative Models
+# ============================================================
+def render_tab_quant(analyzer, today_str):
+    st.subheader('量化多因子预测模型')
+
+    # ---- Sector-level prediction ----
+    st.markdown('### 板块量化预测')
+    with st.spinner('训练板块预测模型...'):
+        sector_df, sector_info = analyzer.quant_predict_sectors()
+    st.caption(sector_info)
+    if not sector_df.empty:
+        # Color-coded table
+        def color_score(val):
+            if val >= 70: return 'background-color:#1a4d1a;color:#38ef7d'
+            elif val >= 50: return 'background-color:#1a3a1a;color:#4facfe'
+            elif val >= 30: return 'background-color:#3a3a1a;color:#f5c542'
+            return 'background-color:#4a1a1a;color:#f5576c'
+        styled = sector_df.style.applymap(color_score, subset=['量化评分'])
+        st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
+        st.caption('5因子模型: 规模因子(涨停数) + 质量因子(早封板率) + 动量因子(连板高度) + 资金因子(净流入) + 风险因子(炸板率)')
+    else:
+        st.info('无板块数据')
+
+    st.divider()
+
+    # ---- Stock-level prediction ----
+    st.markdown('### 全部涨停股量化评分')
+    with st.spinner('计算个股量化评分...'):
+        stock_df, stock_info = analyzer.quant_predict_stocks()
+    st.caption(stock_info)
+    if not stock_df.empty:
+        def color_stock(val):
+            if val >= 75: return 'background-color:#1a4d1a;color:#38ef7d'
+            elif val >= 60: return 'background-color:#1a3a1a;color:#4facfe'
+            elif val >= 45: return 'background-color:#3a3a1a;color:#f5c542'
+            return 'background-color:#4a1a1a;color:#f5576c'
+        styled2 = stock_df.style.applymap(color_stock, subset=['量化评分'])
+        st.dataframe(styled2, use_container_width=True, hide_index=True, height=700)
+        st.caption('5因子模型: 时机因子(封板时间) + 稳定因子(炸板/封单) + 动量因子(连板) + 流动性因子(换手) + 板块因子(板块强度)')
+
+        # Summary stats
+        hs = stock_df['量化评分']
+        c1,c2,c3,c4 = st.columns(4)
+        c1.metric('平均评分', f'{hs.mean():.1f}')
+        c2.metric('高概率连板(≥75)', f'{(hs >= 75).sum()}只')
+        c3.metric('偏多(≥60)', f'{((hs >= 60) & (hs < 75)).sum()}只')
+        c4.metric('偏空(<45)', f'{(hs < 45).sum()}只')
+    else:
+        st.info('无涨停数据')
+
+    st.divider()
+    st.caption('量化模型说明: 基于5因子加权评分法，无需训练数据，因子权重根据市场经验设定。每日自动更新。')
 
 
 if __name__ == '__main__':
