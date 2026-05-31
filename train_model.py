@@ -72,99 +72,22 @@ os.makedirs("stock_reports", exist_ok=True)
 
 # ===================== 数据获取 =====================
 
+# 导入东方财富原生API（绕过代理）
+from eastmoney_api import get_kline as em_get_kline
+
+
 def fetch_kline_batch(codes, days=TRAINING_DAYS):
-    """批量获取K线 — 一次登录，批量查询，避免socket错误"""
-    import baostock as bs
-    end = datetime.now().strftime('%Y-%m-%d')
-    start = (datetime.now() - timedelta(days=days + 20)).strftime('%Y-%m-%d')
+    """批量获取K线 — 东财原生API，trust_env=False绕过代理"""
     results = {}
-
-    try:
-        lg = bs.login()
-        if lg.error_code != '0':
-            print('  Baostock login failed, falling back to AKShare')
-            bs.logout()
-            # Fallback: individual AKShare calls
-            for code in codes:
-                df = _fetch_akshare_kline(code, days)
-                if not df.empty: results[code] = df
-            return results
-
-        for code in codes:
-            try:
-                bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
-                rs = bs.query_history_k_data_plus(
-                    bs_code, 'date,open,high,low,close,volume,amount,turn,pctChg',
-                    start_date=start, end_date=end, frequency='d', adjustflag='2')
-                if rs.error_code == '0':
-                    data = []
-                    while rs.next():
-                        data.append(rs.get_row_data())
-                    if data:
-                        df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
-                        for c in ['open','high','low','close','volume','amount','turn','pctChg']:
-                            df[c] = pd.to_numeric(df[c], errors='coerce')
-                        df = df.dropna(subset=['close'])
-                        if len(df) >= 60:
-                            results[code] = df
-            except (OSError, ConnectionError, ConnectionResetError) as e:
-                # Socket error - re-login and retry
-                try: bs.logout()
-                except: pass
-                time.sleep(1)
-                try:
-                    bs.login()
-                    bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
-                    rs = bs.query_history_k_data_plus(
-                        bs_code, 'date,open,high,low,close,volume,amount,turn,pctChg',
-                        start_date=start, end_date=end, frequency='d', adjustflag='2')
-                    if rs.error_code == '0':
-                        data = []
-                        while rs.next():
-                            data.append(rs.get_row_data())
-                        if data:
-                            df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
-                            for c in ['open','high','low','close','volume','amount','turn','pctChg']:
-                                df[c] = pd.to_numeric(df[c], errors='coerce')
-                            df = df.dropna(subset=['close'])
-                            if len(df) >= 60:
-                                results[code] = df
-                except:
-                    df = _fetch_akshare_kline(code, days)
-                    if not df.empty: results[code] = df
-            except Exception:
-                df = _fetch_akshare_kline(code, days)
-                if not df.empty: results[code] = df
-
-        bs.logout()
-    except Exception as e:
-        print(f'  Baostock batch failed: {e}')
-        try: bs.logout()
-        except: pass
-        # Fallback for all
-        for code in codes:
-            df = _fetch_akshare_kline(code, days)
-            if not df.empty: results[code] = df
-
+    for i, code in enumerate(codes):
+        try:
+            df = em_get_kline(code, days)
+            if df is not None and not df.empty and len(df) >= 60:
+                results[code] = df
+        except Exception as e:
+            if i == 0: print(f'  [WARN] 东财K线 {code}: {e}')
+            continue
     return results
-
-
-def _fetch_akshare_kline(code, days):
-    """AKShare K-line fallback"""
-    try:
-        import akshare as ak
-        prefix = 'sh' + code if code.startswith('6') else 'sz' + code
-        end2 = datetime.now().strftime('%Y%m%d')
-        start2 = (datetime.now() - timedelta(days=days + 20)).strftime('%Y%m%d')
-        df = ak.stock_zh_a_daily(symbol=prefix, start_date=start2, end_date=end2, adjust='qfq')
-        if df is not None and not df.empty and len(df) >= 60:
-            for c_map in [{'日期':'date','开盘':'open','最高':'high','最低':'low','收盘':'close','成交量':'volume','成交额':'amount','换手率':'turn'},
-                          {'date':'date','open':'open','high':'high','low':'low','close':'close','volume':'volume','amount':'amount','turn':'turn'}]:
-                rename = {k:v for k,v in c_map.items() if k in df.columns}
-                if rename: return df.rename(columns=rename)
-    except:
-        pass
-    return pd.DataFrame()
 
 
 def get_concept_stocks():
