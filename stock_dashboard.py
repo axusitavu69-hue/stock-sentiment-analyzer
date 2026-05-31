@@ -37,6 +37,7 @@ class StockAnalyzer:
         self.today_str = analysis_date.strftime('%Y%m%d')
         self.history_days = max(history_days, 60)
         self.tracker_path = "stock_reports/pattern_tracker.json"
+        self.quant_tracker_path = "stock_reports/quant_tracker.json"
         os.makedirs("stock_reports", exist_ok=True)
 
     # ==================== Data Fetching ====================
@@ -1166,6 +1167,116 @@ class StockAnalyzer:
 
 
     # ==================== Quantitative Models ====================
+
+    def _load_quant_tracker(self):
+        if os.path.exists(self.quant_tracker_path):
+            try:
+                with open(self.quant_tracker_path, 'r', encoding='utf-8') as f:
+                    return json.load(f)
+            except: pass
+        return {'predictions': [], 'weights': {'sector': {'size': 25, 'quality': 20, 'momentum': 20, 'fund': 20, 'risk': 15},
+                                                'stock': {'timing': 25, 'stability': 25, 'momentum': 20, 'liquidity': 15, 'sector_strength': 15}},
+                'total_predictions': 0, 'total_correct': 0, 'weight_history': []}
+
+    def _save_quant_tracker(self, track):
+        def convert(obj):
+            if isinstance(obj, (np.integer,)): return int(obj)
+            if isinstance(obj, (np.floating,)): return float(obj)
+            if isinstance(obj, (np.bool_,)): return bool(obj)
+            return str(obj)
+        with open(self.quant_tracker_path, 'w', encoding='utf-8') as f:
+            json.dump(track, f, ensure_ascii=False, indent=2, default=convert)
+
+    def record_quant_predictions(self, stock_predictions):
+        """保存今日预测，供明日验证"""
+        track = self._load_quant_tracker()
+        track['predictions'].append({
+            'date': self.today_str,
+            'stocks': stock_predictions.to_dict('records') if hasattr(stock_predictions, 'to_dict') else [],
+            'stock_count': len(stock_predictions)
+        })
+        # Keep last 60 days
+        if len(track['predictions']) > 60:
+            track['predictions'] = track['predictions'][-60:]
+        track['total_predictions'] += len(stock_predictions)
+        self._save_quant_tracker(track)
+
+    def evaluate_and_evolve(self):
+        """评估最近预测准确性并调整因子权重"""
+        track = self._load_quant_tracker()
+        preds = track['predictions']
+
+        if len(preds) < 2:
+            return None, '需要至少2天数据才能评估，请持续使用模型积累数据。'
+
+        # Compare each day's prediction with next day's actual
+        correct = 0; total = 0
+        weight_adjustments = []
+
+        for i in range(len(preds) - 1):
+            today_pred = preds[i]
+            tomorrow_pred = preds[i + 1]
+            today_stocks = {s.get('代码', ''): s for s in today_pred.get('stocks', [])}
+            tomorrow_stocks_list = tomorrow_pred.get('stocks', [])
+
+            for tomorrow_s in tomorrow_stocks_list:
+                code = tomorrow_s.get('代码', '')
+                if code in today_stocks:
+                    today_s = today_stocks[code]
+                    today_score = today_s.get('量化评分', 50)
+                    tomorrow_score = tomorrow_s.get('量化评分', 50)
+
+                    # Did today's score predict tomorrow's score correctly?
+                    today_high = today_score >= 60
+                    tomorrow_high = tomorrow_score >= 60
+                    if today_high == tomorrow_high:
+                        correct += 1
+                    total += 1
+
+        if total == 0:
+            return None, '无可验证的数据对（需要同一只股票连续两天都在涨停池中）'
+
+        accuracy = correct / total
+        track['total_correct'] = correct
+        track['total_predictions'] = max(track['total_predictions'], total)
+
+        # Adjust weights based on accuracy
+        # Higher accuracy → reinforce current weights
+        # Lower accuracy → shake up weights more
+        old_weights = track['weights']['stock'].copy()
+
+        if accuracy >= 0.7:
+            # Good performance: minor reinforcement
+            track['weights']['stock']['timing'] = min(30, old_weights['timing'] + 2)
+            track['weights']['stock']['stability'] = min(30, old_weights['stability'] + 1)
+        elif accuracy < 0.5:
+            # Poor performance: redistribute
+            track['weights']['stock']['sector_strength'] = min(25, old_weights.get('sector_strength', 15) + 3)
+            track['weights']['stock']['momentum'] = min(25, old_weights['momentum'] + 2)
+
+        # Normalize weights to sum to 100
+        w = track['weights']['stock']
+        total_w = sum(w.values())
+        for k in w: w[k] = round(w[k] / total_w * 100, 1)
+
+        track['weight_history'].append({
+            'date': self.today_str, 'accuracy': round(accuracy, 3),
+            'weights': track['weights']['stock'].copy(), 'samples': total
+        })
+        if len(track['weight_history']) > 30:
+            track['weight_history'] = track['weight_history'][-30:]
+
+        self._save_quant_tracker(track)
+
+        result = {
+            'accuracy': round(accuracy, 3),
+            'samples': total,
+            'correct': correct,
+            'old_weights': old_weights,
+            'new_weights': track['weights']['stock'].copy(),
+            'weight_history': track['weight_history']
+        }
+        return result, None
 
     def quant_predict_sectors(self):
         """量化模型预测板块明日表现 — 基于多因子评分"""
@@ -2468,8 +2579,51 @@ def render_tab_quant(analyzer, today_str):
     else:
         st.info('无涨停数据')
 
+    # ---- Model Evolution ----
     st.divider()
-    st.caption('量化模型说明: 基于5因子加权评分法，无需训练数据，因子权重根据市场经验设定。每日自动更新。')
+    st.subheader('模型学习进化')
+
+    # Record predictions for tomorrow's validation
+    if not stock_df.empty:
+        analyzer.record_quant_predictions(stock_df)
+
+    # Evaluate past predictions
+    eval_result, eval_msg = analyzer.evaluate_and_evolve()
+
+    if eval_result:
+        ac = eval_result['accuracy']
+        color = '#38ef7d' if ac >= 0.7 else ('#f5c542' if ac >= 0.5 else '#f5576c')
+        ec1, ec2, ec3, ec4 = st.columns(4)
+        ec1.metric('预测准确率', f'{ac:.1%}', delta=f'{ac-0.5:+.1%}' if ac != 0.5 else '0%')
+        ec2.metric('验证样本', eval_result['samples'])
+        ec3.metric('预测正确', eval_result['correct'])
+        ec4.metric('学习轮次', len(eval_result.get('weight_history', [])))
+
+        # Show weight evolution
+        if eval_result.get('weight_history') and len(eval_result['weight_history']) >= 2:
+            st.subheader('因子权重进化')
+            import plotly.graph_objects as go
+            wh = eval_result['weight_history']
+            fig = go.Figure()
+            for key in ['timing', 'stability', 'momentum', 'liquidity', 'sector_strength']:
+                vals = [w['weights'].get(key, 0) for w in wh]
+                dates = [w['date'] for w in wh]
+                fig.add_trace(go.Scatter(x=dates, y=vals, mode='lines+markers', name=key, line=dict(width=2)))
+            fig.update_layout(height=350, template='plotly_dark', yaxis_title='权重(%)',
+                              legend=dict(orientation='h', y=1.12))
+            st.plotly_chart(fig, use_container_width=True)
+            st.caption('模型根据历史准确性自动调整权重。权重上升=该因子预测能力强，下降=该因子的预测能力在减弱。')
+
+        # Current vs old weights
+        st.caption(f'当前最优权重: 时机{int(eval_result["new_weights"]["timing"])}% '
+                   f'稳定{int(eval_result["new_weights"]["stability"])}% '
+                   f'动量{int(eval_result["new_weights"]["momentum"])}% '
+                   f'流动性{int(eval_result["new_weights"]["liquidity"])}% '
+                   f'板块{int(eval_result["new_weights"]["sector_strength"])}%')
+    else:
+        st.info(eval_msg or '模型学习中——使用天数越多，预测越准确。每天自动对比预测结果和实际表现来优化权重。')
+
+    st.caption('量化模型说明: 基于5因子加权评分法，因子权重根据历史准确性自动进化。每日自动记录预测结果并与次日实际对比。')
 
 
 if __name__ == '__main__':
