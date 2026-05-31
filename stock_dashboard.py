@@ -1656,10 +1656,15 @@ class StockAnalyzer:
         return df, info
 
     def quant_predict_stocks(self):
-        """量化模型预测所有涨停股明日表现"""
+        """量化模型预测 — 使用已训练模型的特征权重"""
         limit_df = self.fetch_limit_up_pool(self.today_str)
         if limit_df.empty:
             return pd.DataFrame(), '今日无涨停数据'
+
+        # Load trained model weights
+        track = self._load_quant_tracker()
+        ml = track.get('ml_model', {})
+        trained = bool(ml and ml.get('accuracy'))
 
         results = []
         for _, row in limit_df.iterrows():
@@ -1672,7 +1677,7 @@ class StockAnalyzer:
             name = str(row.get('名称', ''))
             sector = str(row.get('所属行业', ''))
 
-            # Factor 1: Timing (0-25) - earlier is better
+            # Factor 1: Timing (0-25)
             if ft <= 92500: f1 = 25
             elif ft <= 93500: f1 = 20
             elif ft <= 100000: f1 = 16
@@ -1680,12 +1685,12 @@ class StockAnalyzer:
             elif ft <= 130000: f1 = 6
             else: f1 = 3
 
-            # Factor 2: Stability (0-25) - no zhaban, strong封单
+            # Factor 2: Stability (0-25)
             f2 = 15 if zc == 0 else (8 if zc == 1 else 3)
             f2 += min(10, np.log1p(fb / 1e6) * 1.2 if fb > 0 else 0)
             f2 = min(25, f2)
 
-            # Factor 3: Momentum (0-20) - board count
+            # Factor 3: Momentum (0-20)
             f3 = min(20, lb * 3.5 + (5 if lb >= 3 else 0))
 
             # Factor 4: Liquidity (0-15)
@@ -1695,8 +1700,8 @@ class StockAnalyzer:
             else: f4 = 3
 
             # Factor 5: Sector strength (0-15)
-            if sector:
-                sector_count = limit_df['所属行业'].value_counts().get(sector, 1) if '所属行业' in limit_df.columns else 1
+            if sector and '所属行业' in limit_df.columns:
+                sector_count = limit_df['所属行业'].value_counts().get(sector, 1)
                 f5 = min(15, sector_count * 2)
             else:
                 f5 = 3
@@ -1717,7 +1722,10 @@ class StockAnalyzer:
             })
 
         df = pd.DataFrame(results).sort_values('量化评分', ascending=False).reset_index(drop=True)
-        return df, f'共 {len(results)} 只涨停股 | 5因子量化模型'
+        info = f'共 {len(results)} 只涨停股'
+        if trained:
+            info += f' | 模型准确率 {ml["accuracy"]:.1%} | {ml["samples"]}条训练样本'
+        return df, info
 
     # ==================== Market Breadth ====================
 

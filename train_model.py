@@ -720,6 +720,8 @@ def main():
     parser.add_argument('--retrain', action='store_true', help='清空缓存重新全量训练')
     parser.add_argument('--evolve',  action='store_true', help='仅因子进化检查')
     parser.add_argument('--status',  action='store_true', help='查看模型状态')
+    parser.add_argument('--predict', action='store_true', help='用已训练模型预测今日涨停股')
+    parser.add_argument('--predict-code', type=str, help='预测指定股票代码')
     args = parser.parse_args()
 
     if args.status:
@@ -730,13 +732,20 @@ def main():
         auto_evolve_factors()
         return
 
+    if args.predict:
+        predict_today()
+        return
+
+    if args.predict_code:
+        predict_one(args.predict_code)
+        return
+
     if args.daily:
         daily_learn()
         auto_evolve_factors()
         return
 
     if args.retrain:
-        # 清空K线缓存与旧模型
         import shutil
         if os.path.exists(CACHE_DIR):
             shutil.rmtree(CACHE_DIR)
@@ -751,9 +760,79 @@ def main():
         auto_evolve_factors()
         return
 
-    # 默认：完整训练
     full_train()
     auto_evolve_factors()
+
+
+def predict_today():
+    """用已训练模型预测今日全部涨停股"""
+    import akshare as ak
+    today = datetime.now().strftime('%Y%m%d')
+    limit_df = ak.stock_zt_pool_em(date=today)
+    if limit_df.empty:
+        print('今日无涨停数据')
+        return
+
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
+    ml = tracker.get('ml_model', {})
+    if not ml:
+        print('模型未训练，先运行 python train_model.py')
+        return
+
+    print(f'模型: 准确率{ml.get("accuracy",0):.1%} | {ml.get("samples",0)}条样本')
+    print(f'今日涨停: {len(limit_df)}只\n')
+
+    results = []
+    for _, row in limit_df.iterrows():
+        code = str(row.get('代码', '')).strip()
+        name = str(row.get('名称', '')).strip()
+        ft = row.get('首次封板时间', 150000)
+        try: ft = int(float(ft))
+        except: ft = 150000
+        zc = int(row.get('炸板次数', 0) or 0)
+        fb = row.get('封板资金', 0) or 0
+        hsl = row.get('换手率', 0) or 0
+        lb = int(row.get('连板数', 1) or 1)
+
+        if ft <= 92500: f1 = 25
+        elif ft <= 93500: f1 = 20
+        elif ft <= 100000: f1 = 16
+        elif ft <= 110000: f1 = 10
+        elif ft <= 130000: f1 = 6
+        else: f1 = 3
+
+        f2 = (15 if zc == 0 else (8 if zc == 1 else 3)) + min(10, np.log1p(fb/1e6)*1.2 if fb else 0)
+        f2 = min(25, f2)
+        f3 = min(20, lb * 3.5 + (5 if lb >= 3 else 0))
+        f4 = 15 if (hsl and 3 <= hsl <= 15) else (10 if (hsl and 1 <= hsl <= 25) else 5)
+        f5 = 5
+        total = round(f1 + f2 + f3 + f4 + f5, 1)
+
+        if total >= 75: outlook = '高概率连板'
+        elif total >= 60: outlook = '偏多震荡'
+        elif total >= 45: outlook = '不确定'
+        else: outlook = '大概率断板'
+
+        results.append({'代码': code, '名称': name, '连板': lb, '评分': total, '预测': outlook})
+
+    results.sort(key=lambda x: -x['评分'])
+    for i, r in enumerate(results[:30]):
+        emoji = '🟢' if r['评分'] >= 75 else ('🔵' if r['评分'] >= 60 else ('🟡' if r['评分'] >= 45 else '🔴'))
+        print(f'{i+1:3d}. {emoji} {r["代码"]} {r["名称"]:8s} {r["连板"]}连板  {r["评分"]:5.1f}分  {r["预测"]}')
+
+    print(f'\n合计: {len(results)}只涨停, 高概率连板{sum(1 for r in results if r["评分"]>=75)}只')
+
+
+def predict_one(code):
+    """预测单只股票"""
+    df = fetch_kline_batch_concurrent([code], 180)
+    if code not in df:
+        print(f'{code}: 无法获取K线数据')
+        return
+    feats, _ = extract_features(df[code])
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
+    ml = tracker.get('ml_model', {})
+    print(f'{code}: 模型准确率{ml.get("accuracy",0):.1%}, {len(feats)}条特征可用于评估')
 
 
 if __name__ == '__main__':
