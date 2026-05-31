@@ -77,46 +77,53 @@ def get_limit_up_pool(date_str=None):
 
 
 def get_kline(code, market='sz', days=300):
-    """个股日K线 — Baostock + 重试"""
+    """个股日K线 — Baostock + 超时守护"""
     import baostock as bs
+    import threading, queue
 
     bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
     end = datetime.now().strftime('%Y-%m-%d')
     start = (datetime.now() - timedelta(days=days + 30)).strftime('%Y-%m-%d')
 
-    for attempt in range(3):
+    result_queue = queue.Queue()
+
+    def _fetch_one():
         try:
-            bs.login()
+            lg = bs.login()
+            if lg.error_code != '0':
+                result_queue.put(None); return
             rs = bs.query_history_k_data_plus(
                 bs_code,
                 'date,open,high,low,close,volume,amount,turn,pctChg',
                 start_date=start, end_date=end,
                 frequency='d', adjustflag='2')
-            if rs.error_code == '0':
-                data = []
-                while True:
-                    try:
-                        if not rs.next(): break
-                        data.append(rs.get_row_data())
-                    except:
-                        break
-                bs.logout()
-                if data and len(data) >= 40:
-                    df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
-                    for c in ['open','high','low','close','volume','amount','turn','pctChg']:
-                        df[c] = pd.to_numeric(df[c], errors='coerce')
-                    return df.dropna(subset=['close'])
+            if rs.error_code != '0':
+                bs.logout(); result_queue.put(None); return
+            data = []
+            while rs.next():
+                data.append(rs.get_row_data())
+                if len(data) > 600: break  # safety limit
             bs.logout()
-        except (OSError, ConnectionError, ConnectionResetError) as e:
-            try: bs.logout()
-            except: pass
-            if attempt < 2:
-                time.sleep(2 * (attempt + 1))
-                continue
+            if data and len(data) >= 40:
+                df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
+                for c in ['open','high','low','close','volume','amount','turn','pctChg']:
+                    df[c] = pd.to_numeric(df[c], errors='coerce')
+                result_queue.put(df.dropna(subset=['close']))
+            else:
+                result_queue.put(None)
         except Exception:
             try: bs.logout()
             except: pass
-            break
+            result_queue.put(None)
+
+    t = threading.Thread(target=_fetch_one, daemon=True)
+    t.start()
+    try:
+        result = result_queue.get(timeout=10)  # 10秒超时
+        if result is not None:
+            return result
+    except queue.Empty:
+        pass
 
     return pd.DataFrame()
 
