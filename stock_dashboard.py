@@ -1672,7 +1672,7 @@ def render_tab_stocks(analyzer, today_str):
     for _, r in limit_df.iterrows():
         lb = int(r.get('连板数', 1) or 1)
         stock_options.append(f"{r.get('代码','')} {r.get('名称','')} ({lb}连板)")
-    stock_options = stock_options[:30]  # limit to 30 for UI
+    # Show all limit-up stocks
 
     sel = st.selectbox('选择涨停股分析', stock_options)
     if not sel: return
