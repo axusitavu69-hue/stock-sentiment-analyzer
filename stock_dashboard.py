@@ -89,27 +89,65 @@ class StockAnalyzer:
     @staticmethod
     @st.cache_data(ttl=300)
     def fetch_stock_history(symbol, days=120):
+        """获取个股历史K线 — Baostock为主，AKShare为备"""
+        import baostock as bs
+        end = datetime.now().strftime('%Y-%m-%d')
+        start = (datetime.now() - timedelta(days=days + 10)).strftime('%Y-%m-%d')
+
+        # symbol format: "sh600000" or "sz000001"
+        if symbol.startswith('sh'):
+            bs_code = f'sh.{symbol[2:]}'
+        elif symbol.startswith('sz'):
+            bs_code = f'sz.{symbol[2:]}'
+        else:
+            bs_code = f'sh.{symbol}' if symbol.startswith('6') else f'sz.{symbol}'
+
+        try:
+            bs.login()
+            rs = bs.query_history_k_data_plus(
+                bs_code,
+                'date,open,high,low,close,volume,amount,turn,pctChg',
+                start_date=start, end_date=end,
+                frequency='d', adjustflag='2'  # 前复权
+            )
+            if rs.error_code == '0':
+                data = []
+                while rs.next():
+                    data.append(rs.get_row_data())
+                bs.logout()
+                if data:
+                    df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
+                    for c in ['open','high','low','close','volume','amount','turn','pctChg']:
+                        df[c] = pd.to_numeric(df[c], errors='coerce')
+                    df = df.dropna(subset=['close'])
+                    if len(df) < 10:
+                        return pd.DataFrame()
+                    return df
+            bs.logout()
+        except Exception as e:
+            print(f'[WARN] baostock {symbol}: {e}')
+            try: bs.logout()
+            except: pass
+
+        # Fallback: AKShare
         import akshare as ak
         try:
-            end = datetime.now().strftime('%Y%m%d')
-            start = (datetime.now() - timedelta(days=days + 5)).strftime('%Y%m%d')
-            df = ak.stock_zh_a_daily(symbol=symbol, start_date=start, end_date=end, adjust="qfq")
-            if df is None or df.empty:
-                return pd.DataFrame()
-            # Normalize column names: Chinese -> English
-            col_map = {'date':'date','open':'open','high':'high','low':'low','close':'close','volume':'volume',
-                       '日期':'date','开盘':'open','最高':'high','最低':'low','收盘':'close','成交量':'volume',
-                       'amount':'amount','成交额':'amount','outstanding_share':'outstanding_share',
-                       '流通股本':'outstanding_share','turnover':'turnover','换手率':'turnover'}
-            df = df.rename(columns={k:v for k,v in col_map.items() if k in df.columns})
-            # Ensure required columns exist
-            for col in ['date','open','high','low','close','volume']:
-                if col not in df.columns:
-                    return pd.DataFrame()
-            return df
-        except Exception as e:
-            print(f"[WARN] fetch_stock_history({symbol}): {e}")
-            return pd.DataFrame()
+            end2 = datetime.now().strftime('%Y%m%d')
+            start2 = (datetime.now() - timedelta(days=days + 5)).strftime('%Y%m%d')
+            df = ak.stock_zh_a_daily(symbol=symbol, start_date=start2, end_date=end2, adjust='qfq')
+            if df is not None and not df.empty:
+                col_map = {k:v for k,v in {'date':'date','open':'open','high':'high','low':'low','close':'close',
+                           'volume':'volume','日期':'date','开盘':'open','最高':'high','最低':'low','收盘':'close',
+                           '成交量':'volume','amount':'amount','成交额':'amount','turnover':'turn','换手率':'turn'}.items() if k in df.columns}
+                df = df.rename(columns=col_map)
+                for c in ['date','open','high','low','close','volume']:
+                    if c not in df.columns:
+                        return pd.DataFrame()
+                return df
+        except Exception as e2:
+            print(f'[WARN] akshare fallback {symbol}: {e2}')
+
+        return pd.DataFrame()
 
     @staticmethod
     @st.cache_data(ttl=300)
