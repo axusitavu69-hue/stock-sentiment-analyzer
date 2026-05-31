@@ -2813,7 +2813,7 @@ def main():
     st.title('A股涨停情绪分析系统 v3.0')
     st.caption(f'分析日期: {analysis_date} | 回溯{history_days}天 | {datetime.now().strftime("%H:%M:%S")}')
 
-    t1,t2,t3,t4,t5,t6 = st.tabs(['市场总览', '板块解读', '个股分析', '明日预测', '市场规律', '量化模型'])
+    t1,t2,t3,t4,t5 = st.tabs(['市场总览', '板块解读', '个股分析', '明日预测', '市场规律'])
     with t1:
         try: render_tab_overview(analyzer, today_str)
         except Exception as e: st.error(f'Tab1 加载失败: {e}')
@@ -2839,9 +2839,6 @@ def main():
             else:
                 st.info('点击上方按钮加载市场规律数据（首次加载需采集60天历史数据，约30秒）')
         except Exception as e: st.error(f'Tab5 加载失败: {e}')
-    with t6:
-        try: render_tab_quant(analyzer, today_str)
-        except Exception as e: st.error(f'Tab6 加载失败: {e}')
 
 
 # ============================================================
