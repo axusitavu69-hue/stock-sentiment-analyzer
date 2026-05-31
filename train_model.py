@@ -129,48 +129,46 @@ except ImportError:
 
 
 def _fetch_one(code: str, days: int) -> tuple:
-    """单只股票获取K线（含缓存）"""
-    # 先查缓存
-    cached = _load_cache(code, days)
-    if cached is not None:
-        return code, cached
+    """单只股票获取K线（含缓存），异常保底返回空"""
+    try:
+        # 先查缓存
+        cached = _load_cache(code, days)
+        if cached is not None:
+            return code, cached
 
-    df = None
-    # 优先东财原生API
-    if _HAS_EM:
-        try:
-            df = em_get_kline(code, days)
-        except Exception:
-            df = None
+        df = None
+        if _HAS_EM:
+            try:
+                df = em_get_kline(code, days)
+            except BaseException:
+                df = None
 
-    # 降级：akshare
-    if df is None or (hasattr(df, 'empty') and df.empty):
-        try:
-            import akshare as ak
-            end_dt = datetime.now().strftime('%Y%m%d')
-            start_dt = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
-            raw = ak.stock_zh_a_hist(
-                symbol=code, period='daily',
-                start_date=start_dt, end_date=end_dt,
-                adjust='qfq'
-            )
-            if raw is not None and not raw.empty:
-                # 统一列名
-                col_map = {
-                    '日期': 'date', '开盘': 'open', '收盘': 'close',
-                    '最高': 'high', '最低': 'low', '成交量': 'volume',
-                    '成交额': 'amount', '涨跌幅': 'pct_chg'
-                }
-                raw.rename(columns=col_map, inplace=True)
-                df = raw.tail(days)
-        except Exception:
-            df = None
+        if df is None or (hasattr(df, 'empty') and df.empty):
+            try:
+                import akshare as ak
+                end_dt = datetime.now().strftime('%Y%m%d')
+                start_dt = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
+                raw = ak.stock_zh_a_hist(
+                    symbol=code, period='daily',
+                    start_date=start_dt, end_date=end_dt,
+                    adjust='qfq'
+                )
+                if raw is not None and not raw.empty:
+                    col_map = {
+                        '日期': 'date', '开盘': 'open', '收盘': 'close',
+                        '最高': 'high', '最低': 'low', '成交量': 'volume',
+                        '成交额': 'amount', '涨跌幅': 'pct_chg'
+                    }
+                    raw.rename(columns=col_map, inplace=True)
+                    df = raw.tail(days)
+            except BaseException:
+                df = None
 
-    # 写缓存
-    if df is not None and not (hasattr(df, 'empty') and df.empty):
-        _save_cache(code, days, df)
-
-    return code, df
+        if df is not None and not (hasattr(df, 'empty') and df.empty):
+            _save_cache(code, days, df)
+        return code, df
+    except BaseException:
+        return code, None
 
 
 def fetch_kline_batch_concurrent(codes: list, days: int = TRAINING_DAYS) -> dict:
@@ -185,10 +183,15 @@ def fetch_kline_batch_concurrent(codes: list, days: int = TRAINING_DAYS) -> dict
     with ThreadPoolExecutor(max_workers=MAX_WORKERS) as executor:
         futures = {executor.submit(_fetch_one, code, days): code for code in codes}
         for future in as_completed(futures):
-            code, df = future.result()
+            try:
+                code, df = future.result()
+            except Exception as e:
+                # Socket crash etc - skip this stock
+                done += 1
+                continue
             done += 1
             if df is not None and not (hasattr(df, 'empty') and df.empty):
-                if len(df) >= 60:          # 至少60条K线才有意义
+                if len(df) >= 60:
                     results[code] = df
             if done % 100 == 0 or done == total:
                 hit = len(results)
