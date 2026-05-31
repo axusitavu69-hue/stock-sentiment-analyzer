@@ -28,6 +28,40 @@ TRACKED_CONCEPTS = [
     '房地产', '新能源汽车', '新能源车', '消费概念', '大消费'
 ]
 
+# Industry mapping: tracked concept -> matching industry names in limit-up pool
+CONCEPT_INDUSTRY_MAP = {
+    '商业航天': ['航空', '航天', '军工', '卫星', '大飞机'],
+    'PCB概念': ['电子元件', '元器件', '印制电路', 'PCB', '电路板'],
+    'PCB': ['电子元件', '元器件', '印制电路', 'PCB', '电路板'],
+    '存储芯片': ['半导体', '芯片', '存储'],
+    'CPO': ['通信设备', '光电', '光通信', '光模块'],
+    '共封装光学': ['通信设备', '光电', '光通信', '光模块'],
+    '创新药': ['化学制药', '化学药', '生物制品', '医药', '中药', '生物医药', '药品'],
+    '算力租赁': ['IT服务', '计算机', '软件', '算力', '云计算'],
+    '钠离子电池': ['电池', '电气设备', '钠电池'],
+    '光纤概念': ['通信设备', '光纤', '光缆', '光通信'],
+    'AI应用': ['计算机', '软件', 'IT服务', '互联网', '人工智能', 'AI'],
+    '人工智能': ['计算机', '软件', 'IT服务', '互联网', '人工智能', 'AI'],
+    '先进封装': ['半导体', '芯片', '封装', '电子'],
+    '人形机器人': ['机器人', '自动化', '机械设备', '通用设备'],
+    '机器人概念': ['机器人', '自动化', '机械设备', '通用设备'],
+    '机器人': ['机器人', '自动化', '机械设备', '通用设备'],
+    '绿色电力': ['电力', '电网设备', '电力设备', '风电', '光伏', '新能源发电'],
+    '数据中心': ['IT服务', '计算机', '数据中心', '云计算'],
+    'AIDC': ['IT服务', '计算机', '数据中心', '云计算'],
+    '储能': ['电池', '电气设备', '储能', '电力设备'],
+    '人工智能芯片': ['半导体', '芯片', 'AI芯片'],
+    'AI芯片': ['半导体', '芯片', 'AI芯片'],
+    '半导体': ['半导体', '芯片', '集成电路'],
+    '白酒概念': ['白酒', '酿酒', '食品饮料'],
+    '白酒': ['白酒', '酿酒', '食品饮料'],
+    '房地产': ['房地产', '地产', '房地产开发'],
+    '新能源汽车': ['汽车', '汽车零部件', '新能源汽车', '新能源车'],
+    '新能源车': ['汽车', '汽车零部件', '新能源汽车', '新能源车'],
+    '消费概念': ['商业', '零售', '食品', '百货', '超市', '消费'],
+    '大消费': ['商业', '零售', '食品', '百货', '超市', '消费'],
+}
+
 QUANT_TRACKER = "stock_reports/quant_tracker.json"
 TRAINING_DAYS = 300
 FEATURE_NAMES = ['5日涨幅', '20日涨幅', '量比', '趋势方向', '距均线偏离', '波动率',
@@ -119,11 +153,20 @@ def get_concept_stocks():
                 sector = str(row.get('所属行业', '')).strip()
                 code = str(row.get('代码', '')).strip()
                 if sector and code.isdigit() and len(code) == 6:
-                    # Check if this sector matches any tracked concept
+                    # Check against concept->industry mapping
                     for tracked in TRACKED_CONCEPTS:
-                        ts = tracked.replace('概念', '').replace('(', '').replace(')', '').replace('（', '').replace('）', '')
-                        rs = sector.replace('概念', '')
-                        if ts in rs or rs in ts or (len(ts) >= 3 and ts[:3] in rs):
+                        keywords = CONCEPT_INDUSTRY_MAP.get(tracked, [tracked])
+                        matched = False
+                        for kw in keywords:
+                            if kw in sector or sector in kw:
+                                matched = True; break
+                        if not matched:
+                            # Fallback: direct fuzzy match
+                            ts = tracked.replace('概念', '').replace('(', '').replace(')', '')
+                            rs = sector.replace('概念', '')
+                            if ts in rs or rs in ts or (len(ts) >= 3 and ts[:3] in rs):
+                                matched = True
+                        if matched:
                             all_stocks[tracked].add(code)
                             break
         except Exception as e:
@@ -216,8 +259,9 @@ def train_model(features, labels, tag=""):
     split = int(len(X) * 0.8)
 
     from lightgbm import LGBMClassifier
-    model = LGBMClassifier(n_estimators=150, learning_rate=0.02, num_leaves=24,
-                           max_depth=8, random_state=42, verbose=-1)
+    model = LGBMClassifier(n_estimators=300, learning_rate=0.01, num_leaves=31,
+                           max_depth=10, min_child_samples=20, subsample=0.8,
+                           colsample_bytree=0.8, random_state=42, verbose=-1)
     model.fit(X[:split], y[:split])
     acc = float(model.score(X[split:], y[split:]))
     importance = model.feature_importances_
