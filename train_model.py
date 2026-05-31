@@ -750,19 +750,18 @@ def main():
 
     if args.retrain:
         import shutil
-        if os.path.exists(CACHE_DIR):
-            shutil.rmtree(CACHE_DIR)
-            os.makedirs(CACHE_DIR)
-            print(f'已清空K线缓存: {CACHE_DIR}/')
-        for f in [QUANT_TRACKER, MODEL_PKL]:
+        # 备份旧文件（不删除，训练成功后再覆盖）
+        for f in [QUANT_TRACKER]:
             if os.path.exists(f):
-                bak = f + f'.bak_{datetime.now().strftime("%Y%m%d_%H%M%S")}'
-                os.rename(f, bak)
+                bak = f + '.bak'
+                shutil.copy(f, bak)
                 print(f'旧文件备份: {bak}')
         full_train()
         auto_evolve_factors()
         return
 
+    # 默认：继续训练（不清缓存，从已有缓存基础上增量）
+    print('继续训练模式（不清缓存）...')
     full_train()
     auto_evolve_factors()
 
