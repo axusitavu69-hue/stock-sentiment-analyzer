@@ -107,7 +107,7 @@ def get_concept_stocks():
     end = datetime.now()
     print('  从历史涨停池中收集行业→个股映射...')
     sample_days = 0
-    for i in range(120, 0, -3):  # every 3 days, up to 120 days back
+    for i in range(365, 0, -2):  # every 2 days, up to 1 year back
         dt = end - timedelta(days=i)
         d_str = dt.strftime('%Y%m%d')
         try:
@@ -138,8 +138,8 @@ def get_concept_stocks():
     for tracked in TRACKED_CONCEPTS:
         codes = all_stocks.get(tracked, set())
         if codes:
-            result[tracked] = list(codes)[:30]  # max 30 per concept
-            print(f'  [OK] {tracked}: {len(codes)}只 (取前30)')
+            result[tracked] = list(codes)[:50]  # max 50 per concept
+            print(f'  [OK] {tracked}: {len(codes)}只 (取前50)')
         else:
             print(f'  [MISS] {tracked}: 未在历史涨停中找到匹配行业')
 
