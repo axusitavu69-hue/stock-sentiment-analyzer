@@ -99,67 +99,51 @@ def fetch_kline(code, days=TRAINING_DAYS):
 
 
 def get_concept_stocks():
-    """获取所有追踪概念的成分股"""
+    """获取所有追踪概念的成分股 — 用涨停池历史数据做行业映射，不调被拦API"""
     import akshare as ak
-    all_stocks = {}  # concept_name -> [codes]
+    all_stocks = defaultdict(set)  # concept_name -> set(codes)
 
-    # Get concept name mapping
-    concept_map = {}
-    try:
-        names_df = ak.stock_board_concept_name_em()
-        for c in names_df.columns:
-            if '名称' in str(c) or '板块' in str(c):
-                concept_map = {str(n): str(n) for n in names_df[c].tolist()}
-                break
-    except Exception as e:
-        print(f'[WARN] concept_name_em: {e}')
-
-    if not concept_map:
-        # Fallback: use fund flow
+    # Collect stocks from historical limit-up pools using 所属行业 field
+    end = datetime.now()
+    print('  从历史涨停池中收集行业→个股映射...')
+    sample_days = 0
+    for i in range(120, 0, -3):  # every 3 days, up to 120 days back
+        dt = end - timedelta(days=i)
+        d_str = dt.strftime('%Y%m%d')
         try:
-            ff = ak.stock_fund_flow_concept(symbol='即时')
-            concept_map = {str(n): str(n) for n in ff['行业'].tolist()}
-        except:
-            pass
-
-    if not concept_map:
-        print('[ERROR] 无法获取概念列表')
-        return all_stocks
-
-    for tracked in TRACKED_CONCEPTS:
-        # Fuzzy match to real concept names
-        matches = []
-        ts = tracked.replace('概念', '').replace('(', '').replace(')', '')
-        for real_name in concept_map:
-            rs = real_name.replace('概念', '')
-            if ts in rs or rs in ts or (len(ts) >= 3 and ts[:3] in rs):
-                matches.append(real_name)
-
-        if not matches:
-            print(f'  [SKIP] {tracked}: 无匹配概念')
-            continue
-
-        codes = set()
-        for match_name in matches[:3]:
-            try:
-                cons = ak.stock_board_concept_cons_em(symbol=match_name)
-                if cons is not None and not cons.empty:
-                    for c in cons.columns:
-                        if '代码' in str(c):
-                            for cd in cons[c].astype(str).str.zfill(6).str.strip().tolist()[:20]:
-                                if cd.isdigit() and len(cd) == 6:
-                                    codes.add(cd)
+            df = ak.stock_zt_pool_em(date=d_str)
+            if df is None or df.empty or '所属行业' not in df.columns:
+                continue
+            sample_days += 1
+            for _, row in df.iterrows():
+                sector = str(row.get('所属行业', '')).strip()
+                code = str(row.get('代码', '')).strip()
+                if sector and code.isdigit() and len(code) == 6:
+                    # Check if this sector matches any tracked concept
+                    for tracked in TRACKED_CONCEPTS:
+                        ts = tracked.replace('概念', '').replace('(', '').replace(')', '').replace('（', '').replace('）', '')
+                        rs = sector.replace('概念', '')
+                        if ts in rs or rs in ts or (len(ts) >= 3 and ts[:3] in rs):
+                            all_stocks[tracked].add(code)
                             break
-            except Exception as e:
-                print(f'  [WARN] {match_name}: {e}')
+        except Exception as e:
+            continue
+        if sample_days % 10 == 0:
+            print(f'    已采样 {sample_days} 个交易日...')
 
+    print(f'  采样了 {sample_days} 个交易日')
+
+    # Report results
+    result = {}
+    for tracked in TRACKED_CONCEPTS:
+        codes = all_stocks.get(tracked, set())
         if codes:
-            all_stocks[tracked] = list(codes)
-            print(f'  [OK] {tracked}: {len(codes)}只')
+            result[tracked] = list(codes)[:30]  # max 30 per concept
+            print(f'  [OK] {tracked}: {len(codes)}只 (取前30)')
         else:
-            print(f'  [SKIP] {tracked}: 无成分股数据')
+            print(f'  [MISS] {tracked}: 未在历史涨停中找到匹配行业')
 
-    return all_stocks
+    return result
 
 
 # ===================== 特征工程 =====================
