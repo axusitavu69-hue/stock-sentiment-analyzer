@@ -2546,7 +2546,7 @@ def render_tab_quant(analyzer, today_str):
             elif val >= 50: return 'background-color:#1a3a1a;color:#4facfe'
             elif val >= 30: return 'background-color:#3a3a1a;color:#f5c542'
             return 'background-color:#4a1a1a;color:#f5576c'
-        styled = sector_df.style.applymap(color_score, subset=['量化评分'])
+        styled = sector_df.style.map(color_score, subset=['量化评分'])
         st.dataframe(styled, use_container_width=True, hide_index=True, height=500)
         st.caption('5因子模型: 规模因子(涨停数) + 质量因子(早封板率) + 动量因子(连板高度) + 资金因子(净流入) + 风险因子(炸板率)')
     else:
@@ -2565,7 +2565,7 @@ def render_tab_quant(analyzer, today_str):
             elif val >= 60: return 'background-color:#1a3a1a;color:#4facfe'
             elif val >= 45: return 'background-color:#3a3a1a;color:#f5c542'
             return 'background-color:#4a1a1a;color:#f5576c'
-        styled2 = stock_df.style.applymap(color_stock, subset=['量化评分'])
+        styled2 = stock_df.style.map(color_stock, subset=['量化评分'])
         st.dataframe(styled2, use_container_width=True, hide_index=True, height=700)
         st.caption('5因子模型: 时机因子(封板时间) + 稳定因子(炸板/封单) + 动量因子(连板) + 流动性因子(换手) + 板块因子(板块强度)')
 
