@@ -89,12 +89,12 @@ class StockAnalyzer:
     @staticmethod
     @st.cache_data(ttl=300)
     def fetch_stock_history(symbol, days=120):
-        """获取个股历史K线 — Baostock为主，AKShare为备"""
+        """获取个股历史K线 — Baostock为主(5秒超时)，AKShare为备"""
         import baostock as bs
+        import threading, queue
         end = datetime.now().strftime('%Y-%m-%d')
         start = (datetime.now() - timedelta(days=days + 10)).strftime('%Y-%m-%d')
 
-        # symbol format: "sh600000" or "sz000001"
         if symbol.startswith('sh'):
             bs_code = f'sh.{symbol[2:]}'
         elif symbol.startswith('sz'):
@@ -102,32 +102,43 @@ class StockAnalyzer:
         else:
             bs_code = f'sh.{symbol}' if symbol.startswith('6') else f'sz.{symbol}'
 
-        try:
-            bs.login()
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                'date,open,high,low,close,volume,amount,turn,pctChg',
-                start_date=start, end_date=end,
-                frequency='d', adjustflag='2'  # 前复权
-            )
-            if rs.error_code == '0':
-                data = []
-                while rs.next():
-                    data.append(rs.get_row_data())
+        # Use thread with timeout to prevent hanging
+        result_queue = queue.Queue()
+        def _bs_fetch():
+            try:
+                lg = bs.login()
+                if lg.error_code != '0':
+                    result_queue.put(None); return
+                rs = bs.query_history_k_data_plus(
+                    bs_code, 'date,open,high,low,close,volume,amount,turn,pctChg',
+                    start_date=start, end_date=end, frequency='d', adjustflag='2')
+                if rs.error_code == '0':
+                    data = []
+                    while rs.next():
+                        data.append(rs.get_row_data())
+                    bs.logout()
+                    if data:
+                        df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
+                        for c in ['open','high','low','close','volume','amount','turn','pctChg']:
+                            df[c] = pd.to_numeric(df[c], errors='coerce')
+                        df = df.dropna(subset=['close'])
+                        result_queue.put(df if len(df) >= 10 else None)
+                        return
                 bs.logout()
-                if data:
-                    df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
-                    for c in ['open','high','low','close','volume','amount','turn','pctChg']:
-                        df[c] = pd.to_numeric(df[c], errors='coerce')
-                    df = df.dropna(subset=['close'])
-                    if len(df) < 10:
-                        return pd.DataFrame()
-                    return df
-            bs.logout()
-        except Exception as e:
-            print(f'[WARN] baostock {symbol}: {e}')
-            try: bs.logout()
-            except: pass
+                result_queue.put(None)
+            except:
+                try: bs.logout()
+                except: pass
+                result_queue.put(None)
+
+        t = threading.Thread(target=_bs_fetch, daemon=True)
+        t.start()
+        try:
+            result = result_queue.get(timeout=8)
+            if result is not None:
+                return result
+        except queue.Empty:
+            print(f'[WARN] baostock {symbol} timed out')
 
         # Fallback: AKShare
         import akshare as ak
@@ -136,9 +147,12 @@ class StockAnalyzer:
             start2 = (datetime.now() - timedelta(days=days + 5)).strftime('%Y%m%d')
             df = ak.stock_zh_a_daily(symbol=symbol, start_date=start2, end_date=end2, adjust='qfq')
             if df is not None and not df.empty:
-                col_map = {k:v for k,v in {'date':'date','open':'open','high':'high','low':'low','close':'close',
-                           'volume':'volume','日期':'date','开盘':'open','最高':'high','最低':'low','收盘':'close',
-                           '成交量':'volume','amount':'amount','成交额':'amount','turnover':'turn','换手率':'turn'}.items() if k in df.columns}
+                col_map = {}
+                for k, v in {'date':'date','open':'open','high':'high','low':'low','close':'close',
+                             'volume':'volume','日期':'date','开盘':'open','最高':'high','最低':'low',
+                             '收盘':'close','成交量':'volume','amount':'amount','成交额':'amount',
+                             'turnover':'turn','换手率':'turn'}.items():
+                    if k in df.columns: col_map[k] = v
                 df = df.rename(columns=col_map)
                 for c in ['date','open','high','low','close','volume']:
                     if c not in df.columns:
