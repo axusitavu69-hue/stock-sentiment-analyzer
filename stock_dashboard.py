@@ -175,6 +175,7 @@ class StockAnalyzer:
     @st.cache_data(ttl=7200)
     def fetch_stock_comment():
         import akshare as ak
+        import signal
         try:
             df = ak.stock_comment_em()
             return df if df is not None and not df.empty else pd.DataFrame()
@@ -277,31 +278,23 @@ class StockAnalyzer:
     # ==================== Stock Comment Sentiment ====================
 
     def get_stock_sentiment(self, code):
-        """从 stock_comment_em 获取个股综合得分和关注指数"""
-        try:
-            comment_df = StockAnalyzer.fetch_stock_comment()
-            if comment_df is None or comment_df.empty:
-                return 10, 5
-            # Robust column detection
-            code_col = '代码'
-            if code_col not in comment_df.columns:
-                for c in comment_df.columns:
-                    if '代码' in str(c) or 'code' in str(c).lower():
-                        code_col = c; break
-            if code_col not in comment_df.columns:
-                return 10, 5
-            match = comment_df[comment_df[code_col].astype(str).str.strip() == str(code).strip()]
-            if match.empty: return 10, 5
-            row = match.iloc[0]
-            zonghe = 50; guanzhu = 50
-            for c in comment_df.columns:
-                cn = str(c)
-                if '综合得分' in cn or '得分' in cn: zonghe = float(row.get(c, 50) or 50)
-                if '关注指数' in cn or '关注' in cn: guanzhu = float(row.get(c, 50) or 50)
-            return min(10, zonghe / 10), min(10, guanzhu / 10)
-        except Exception as e:
-            print(f"[WARN] get_stock_sentiment({code}): {e}")
+        """个股情绪分——从涨停盘面数据推导，不依赖外部API"""
+        # Use limit-up pool data as sentiment proxy:
+        # High封板资金 + early封板 + no炸板 = strong sentiment
+        limit_df = self.fetch_limit_up_pool(self.today_str)
+        if limit_df.empty or '代码' not in limit_df.columns:
             return 10, 5
+        match = limit_df[limit_df['代码'].astype(str).str.strip() == str(code).strip()]
+        if match.empty: return 10, 5
+        row = match.iloc[0]
+        fb = row.get('封板资金', 0) or 0
+        hsl = row.get('换手率', 0) or 0
+        zc = int(row.get('炸板次数', 0) or 0)
+        lb = max(1, int(row.get('连板数', 1) or 1))
+        # Sentiment proxy score
+        sent = 5 + min(5, (fb / 1e9)) + (3 if 3 <= hsl <= 15 else 1) + (2 if zc == 0 else 0) + min(3, lb)
+        att = 5 + min(5, hsl / 5 if hsl else 5)
+        return min(10, sent), min(10, att)
 
     # ==================== 3D Quality Score ====================
 
