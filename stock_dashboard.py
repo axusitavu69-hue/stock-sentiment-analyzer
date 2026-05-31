@@ -1372,6 +1372,127 @@ class StockAnalyzer:
         '房地产', '新能源汽车', '新能源车', '消费概念', '大消费'
     ]
 
+    # ==================== Historical Training Data ====================
+
+    @staticmethod
+    @st.cache_data(ttl=86400)
+    def fetch_concept_stocks_historical(concept_name, days=180):
+        """获取概念板块成分股180天历史价格数据"""
+        import akshare as ak
+        stocks_data = {}
+        try:
+            cons_df = ak.stock_board_concept_cons_em(symbol=concept_name)
+            if cons_df is None or cons_df.empty:
+                return stocks_data
+            codes = cons_df['代码'].astype(str).str.strip().tolist()[:50]  # top 50 stocks
+        except:
+            return stocks_data
+
+        end = datetime.now().strftime('%Y%m%d')
+        start = (datetime.now() - timedelta(days=days + 10)).strftime('%Y%m%d')
+
+        for code in codes[:30]:  # limit to 30 stocks per concept
+            try:
+                prefix = 'sh' + code if code.startswith('6') else 'sz' + code
+                df = ak.stock_zh_a_daily(symbol=prefix, start_date=start, end_date=end, adjust='qfq')
+                if df is not None and not df.empty:
+                    close = np.array(df['close'].values, dtype=float).flatten()
+                    vol = np.array(df.get('volume', [0]).values, dtype=float).flatten()
+                    if len(close) >= 60:
+                        stocks_data[code] = {'close': close, 'volume': vol, 'days': len(close)}
+            except:
+                continue
+
+        return stocks_data
+
+    def train_on_concept_data(self):
+        """用追踪概念板块的180天价格数据训练量化模型"""
+        track = self._load_quant_tracker()
+
+        # Build training features from tracked concepts
+        all_features = []
+        all_labels = []
+        trained_concepts = 0
+
+        for concept in self.TRACKED_CONCEPTS[:20]:  # limit for performance
+            stocks_data = StockAnalyzer.fetch_concept_stocks_historical(concept, 180)
+            if len(stocks_data) < 5:
+                continue
+            trained_concepts += 1
+
+            for code, data in stocks_data.items():
+                close = data['close']
+                vol = data['volume']
+                if len(close) < 65:
+                    continue
+
+                # Extract features at each point
+                for i in range(60, len(close) - 1):
+                    window = close[i-60:i]
+                    vol_window = vol[i-60:i]
+
+                    # Features
+                    ma5 = np.mean(window[-5:])
+                    ma20 = np.mean(window[-20:])
+                    ret_5d = (close[i] - close[i-5]) / close[i-5] * 100 if close[i-5] > 0 else 0
+                    ret_20d = (close[i] - close[i-20]) / close[i-20] * 100 if close[i-20] > 0 else 0
+                    vol_ratio = vol[i] / (np.mean(vol_window[-20:]) + 1) if len(vol_window) >= 20 else 1
+                    trend = 1 if ma5 > ma20 else -1
+                    vola = np.std(window[-20:]) / np.mean(window[-20:]) * 100 if np.mean(window[-20:]) > 0 else 0
+
+                    features = [ret_5d, ret_20d, vol_ratio, trend,
+                                (close[i] - ma20) / ma20 * 100, vola]
+                    all_features.append(features)
+
+                    # Label: next-day return
+                    next_ret = (close[i+1] - close[i]) / close[i] * 100 if close[i] > 0 else 0
+                    all_labels.append(1 if next_ret > 0 else 0)
+
+        if len(all_features) < 100:
+            return {'status': 'insufficient', 'samples': len(all_features),
+                    'concepts_trained': trained_concepts,
+                    'message': f'训练数据不足（仅{len(all_features)}条），需要更多历史数据'}
+
+        X = np.array(all_features)
+        y = np.array(all_labels)
+
+        # Train LightGBM
+        try:
+            from lightgbm import LGBMClassifier
+            split = int(len(X) * 0.8)
+            X_tr, X_te = X[:split], X[split:]
+            y_tr, y_te = y[:split], y[split:]
+
+            model = LGBMClassifier(n_estimators=120, learning_rate=0.03, num_leaves=20,
+                                   max_depth=6, random_state=42, verbose=-1)
+            model.fit(X_tr, y_tr)
+            acc = model.score(X_te, y_te)
+            importance = model.feature_importances_
+
+            # Save trained model params to tracker
+            track = self._load_quant_tracker()
+            track['ml_model'] = {
+                'trained_date': self.today_str,
+                'accuracy': round(acc, 3),
+                'samples': len(all_features),
+                'concepts': trained_concepts,
+                'feature_names': ['5日涨幅', '20日涨幅', '量比', '趋势方向', '距均线', '波动率'],
+                'feature_importance': importance.tolist(),
+                'model_type': 'LightGBM'
+            }
+            self._save_quant_tracker(track)
+
+            return {
+                'status': 'success', 'accuracy': round(acc, 3),
+                'samples': len(all_features), 'concepts_trained': trained_concepts,
+                'train_samples': len(X_tr), 'test_samples': len(X_te),
+                'feature_importance': dict(zip(['5日涨幅', '20日涨幅', '量比', '趋势方向', '距均线', '波动率'],
+                                              importance.round(3).tolist())),
+                'message': f'训练完成！准确率{acc:.1%}，基于{trained_concepts}个概念板块的{len(all_features)}条历史数据'
+            }
+        except Exception as e:
+            return {'status': 'error', 'message': str(e), 'samples': len(all_features)}
+
     def quant_predict_sectors(self):
         """量化模型预测板块明日表现 — 基于多因子评分，追踪指定概念"""
         limit_df = self.fetch_limit_up_pool(self.today_str)
@@ -2649,6 +2770,38 @@ def main():
 # ============================================================
 def render_tab_quant(analyzer, today_str):
     st.subheader('量化多因子预测模型')
+
+    # ---- Model Training Section ----
+    with st.expander('模型训练（基于概念板块180天历史数据）', expanded=False):
+        st.caption('使用追踪的20+概念板块成分股180天价格数据训练LightGBM模型')
+        col_tr1, col_tr2 = st.columns([2, 1])
+        with col_tr1:
+            if st.button('开始训练模型', use_container_width=True, type='primary', key='btn_train_ml'):
+                with st.spinner('正在从概念板块获取180天价格数据并训练模型...（约需1-2分钟）'):
+                    train_result = analyzer.train_on_concept_data()
+                st.session_state['train_result'] = train_result
+            train_result = st.session_state.get('train_result')
+            if train_result:
+                if train_result['status'] == 'success':
+                    st.success(f"✅ {train_result['message']}")
+                    # Feature importance
+                    fi = train_result.get('feature_importance', {})
+                    if fi:
+                        import plotly.graph_objects as go
+                        fig = go.Figure(go.Bar(
+                            x=list(fi.values()), y=list(fi.keys()), orientation='h',
+                            marker=dict(color='#ff6b6b'),
+                            text=[f'{v:.3f}' for v in fi.values()], textposition='outside'))
+                        fig.update_layout(height=250, template='plotly_dark', xaxis_title='重要性')
+                        st.plotly_chart(fig, use_container_width=True)
+                elif train_result['status'] == 'insufficient':
+                    st.warning(train_result['message'])
+                else:
+                    st.error(train_result.get('message', '训练失败'))
+        with col_tr2:
+            st.metric('追踪概念', f'{len(analyzer.TRACKED_CONCEPTS)}个')
+            st.metric('每概念取样', '30只')
+            st.metric('回溯天数', '180天')
 
     # ---- Sector-level prediction ----
     st.markdown('### 板块量化预测')
