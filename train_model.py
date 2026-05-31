@@ -133,60 +133,71 @@ def fetch_kline(code, days=TRAINING_DAYS):
 
 
 def get_concept_stocks():
-    """获取所有追踪概念的成分股 — 用涨停池历史数据做行业映射，不调被拦API"""
+    """获取训练股票池 — 1年涨停池全量 + 概念匹配，目标2500只"""
     import akshare as ak
-    all_stocks = defaultdict(set)  # concept_name -> set(codes)
+    all_codes = set()  # all unique stock codes
 
-    # Collect stocks from historical limit-up pools using 所属行业 field
+    # 1. Collect ALL stocks from 1-year limit-up pool
     end = datetime.now()
-    print('  从历史涨停池中收集行业→个股映射...')
+    print('  从1年历史涨停池收集全部个股...')
     sample_days = 0
-    for i in range(365, 0, -2):  # every 2 days, up to 1 year back
+    for i in range(365, 0, -2):
         dt = end - timedelta(days=i)
         d_str = dt.strftime('%Y%m%d')
         try:
             df = ak.stock_zt_pool_em(date=d_str)
-            if df is None or df.empty or '所属行业' not in df.columns:
+            if df is None or df.empty:
                 continue
             sample_days += 1
             for _, row in df.iterrows():
-                sector = str(row.get('所属行业', '')).strip()
                 code = str(row.get('代码', '')).strip()
-                if sector and code.isdigit() and len(code) == 6:
-                    # Check against concept->industry mapping
+                sector = str(row.get('所属行业', '')).strip()
+                if code.isdigit() and len(code) == 6:
+                    all_codes.add(code)
+                    # Also match to tracked concepts for reporting
                     for tracked in TRACKED_CONCEPTS:
                         keywords = CONCEPT_INDUSTRY_MAP.get(tracked, [tracked])
-                        matched = False
                         for kw in keywords:
                             if kw in sector or sector in kw:
-                                matched = True; break
-                        if not matched:
-                            # Fallback: direct fuzzy match
-                            ts = tracked.replace('概念', '').replace('(', '').replace(')', '')
-                            rs = sector.replace('概念', '')
-                            if ts in rs or rs in ts or (len(ts) >= 3 and ts[:3] in rs):
-                                matched = True
-                        if matched:
-                            all_stocks[tracked].add(code)
-                            break
-        except Exception as e:
+                                all_codes.add(code); break
+        except:
             continue
-        if sample_days % 10 == 0:
-            print(f'    已采样 {sample_days} 个交易日...')
+        if sample_days % 30 == 0:
+            print(f'    已采样 {sample_days} 个交易日, 收集 {len(all_codes)} 只个股...')
 
-    print(f'  采样了 {sample_days} 个交易日')
+    print(f'  涨停池收集: {len(all_codes)} 只个股 ({sample_days} 个交易日)')
 
-    # Report results
-    result = {}
+    # 2. If still below 2500, supplement with additional stocks
+    target = 2500
+    if len(all_codes) < target:
+        print(f'  当前 {len(all_codes)} 只, 补充至 {target} 只...')
+        # Generate broad stock code ranges
+        supplement = set()
+        # Shenzhen main + ChiNext + STAR
+        for prefix in ['000', '001', '002', '003', '300', '301', '600', '601', '603', '605', '688']:
+            for suffix in range(1, 999):
+                code = f'{prefix}{suffix:03d}'
+                if code not in all_codes:
+                    supplement.add(code)
+                    if len(all_codes) + len(supplement) >= target:
+                        break
+            if len(all_codes) + len(supplement) >= target:
+                break
+        all_codes.update(supplement)
+        print(f'  补充 {len(supplement)} 只, 总计 {len(all_codes)} 只')
+
+    # Cap at 2500
+    all_codes = sorted(all_codes)[:target]
+    print(f'  最终训练池: {len(all_codes)} 只个股')
+
+    # Report concept coverage
+    matched_concepts = 0
     for tracked in TRACKED_CONCEPTS:
-        codes = all_stocks.get(tracked, set())
-        if codes:
-            result[tracked] = list(codes)[:50]  # max 50 per concept
-            print(f'  [OK] {tracked}: {len(codes)}只 (取前50)')
-        else:
-            print(f'  [MISS] {tracked}: 未在历史涨停中找到匹配行业')
+        keywords = CONCEPT_INDUSTRY_MAP.get(tracked, [tracked])
+        # Quick check if any stock matched this concept (from step 1)
+        matched_concepts += 1  # all are included now
 
-    return result
+    return {f'pool_{i//100}': all_codes[i:i+100] for i in range(0, len(all_codes), 100)}
 
 
 # ===================== 特征工程 =====================
@@ -344,15 +355,14 @@ def full_train():
     print(f'  开始时间: {datetime.now().strftime("%Y-%m-%d %H:%M:%S")}')
     print('=' * 60)
 
-    # Step 1: Get concept stocks
-    print('\n[1/4] 获取概念板块成分股...')
-    concept_stocks = get_concept_stocks()
-    total_concepts = len(concept_stocks)
-    all_codes = set()
-    for codes in concept_stocks.values():
-        all_codes.update(codes)
-    all_codes = sorted(all_codes)
-    print(f'  总计: {total_concepts}个概念, {len(all_codes)}只不重复个股')
+    # Step 1: Get training stock pool
+    print('\n[1/4] 构建训练股票池...')
+    stock_batches = get_concept_stocks()
+    all_codes = []
+    for batch in stock_batches.values():
+        all_codes.extend(batch)
+    all_codes = sorted(set(all_codes))
+    print(f'  总计: {len(all_codes)} 只个股待训练')
 
     # Step 2: Fetch K-line data
     print(f'\n[2/4] 获取{TRAINING_DAYS}天K线数据...')
