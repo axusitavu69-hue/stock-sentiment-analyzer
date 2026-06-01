@@ -992,28 +992,35 @@ def predict_one(code):
 
     # ----- 最终 -----
     print(f'\n  {"="*60}')
-    direction = '看多' if posterior >= 0.5 else '看空'
-    if calibrated >= 0.60:
-        verdict = f'{direction} | 高度确信 | 历史胜率显著高于平均'
+    # 方向判定：只有当证据一致性足够高时才给出方向
+    if consistency < 0.15:
+        # 证据几乎均等 → 无法判断
+        direction = '无法判断'
+        verdict = '证据几乎均等，多空双方都没有优势。今天不是交易的好时机。'
+    elif calibrated >= 0.60:
+        direction = '看多' if posterior >= 0.5 else '看空'
+        verdict = f'{direction} | 高度确信 | 模型最有把握的预测类型'
     elif calibrated >= 0.45:
+        direction = '看多' if posterior >= 0.5 else '看空'
         verdict = f'{direction} | 中等确信 | 方向明确但有余地'
     elif calibrated >= 0.35:
-        verdict = f'{direction} | 低确信 | 信号不够清晰，不建议重仓'
+        direction = '看多' if posterior >= 0.5 else '看空'
+        verdict = f'{direction} | 低确信 | 不建议重仓参与'
     else:
-        verdict = f'{direction} | 毫无信心 | 最优策略是不交易'
+        direction = '无法判断'
+        verdict = '证据强度不足以支持方向判断。模型选择不预测——"不交易"本身就是一个决策。'
+
     print(f'  [最终判决] {verdict}')
     print(f'  原始评分: {raw_score:.0f}/100 | 校准置信度: {calibrated:.0%}')
 
-    # 警告：表面分数和真实把握差距大时触发
+    # 警告：表面分数和真实把握背离
     gap = abs(raw_score / 100 - calibrated)
     if gap > 0.25:
-        print(f'  [警告] 表面评分与真实把握严重背离！')
+        print(f'  [注意] 表面评分与真实把握有较大差距')
         if raw_score > 60 and calibrated < 0.40:
-            print(f'  虽然原始信号偏多({raw_score:.0f}分)，但模型检测到高波动或不一致的证据，')
-            print(f'  认为这次预测不可靠。盲目追涨大概率被套。')
+            print(f'  评分偏高但证据不足→别被表面数字骗了')
         elif raw_score < 40 and calibrated > 0.50:
-            print(f'  虽然原始信号偏弱({raw_score:.0f}分)，但模型检测到稳定的证据结构，')
-            print(f'  认为存在被低估的机会。这可能是一个逆势的好买点。')
+            print(f'  评分偏低但证据稳定→可能存在被低估的机会')
     print(f'{"="*60}\n')
 
 
