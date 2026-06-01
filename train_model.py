@@ -804,6 +804,14 @@ def predict_one(code):
     """预测单只个股明日涨跌"""
     import akshare as ak
 
+    code = code.strip().zfill(6)
+    if not code.isdigit() or len(code) != 6:
+        print(f'错误: "{code}" 不是有效的A股代码（需要6位数字）')
+        return
+    if not (code.startswith(('0','3','6'))):
+        print(f'错误: "{code}" 不是有效的A股代码（需以0/3/6开头）')
+        return
+
     # 获取今日涨停数据
     today = datetime.now().strftime('%Y%m%d')
     limit_df = ak.stock_zt_pool_em(date=today)
@@ -817,7 +825,7 @@ def predict_one(code):
     print(f'获取 {code} K线数据...')
     kline_data = fetch_kline_batch_concurrent([code], 180)
     if code not in kline_data:
-        print(f'{code}: 无法获取K线数据')
+        print(f'{code}: 无法获取K线数据（可能是不存在的代码或数据源无此股票）')
         return
 
     # 提取特征
