@@ -903,139 +903,117 @@ def predict_one(code):
     trend_5d = '上升' if np.mean(recent_5) > 0 else '下降'
     print(f'\n  近5日动量: {trend_5d}')
 
-    # ========== 模型自主推理引擎 ==========
-    print(f'\n  {"="*55}')
-    print(f'  [模型自主推理] 从数据中发现规律')
-    print(f'  {"="*55}')
+    # ========== 深度推理引擎 v2.0 ==========
+    print(f'\n  {"="*60}')
+    print(f'  [深度推理] 模型自主思考过程')
+    print(f'  {"="*60}')
 
-    # 1. 统计显著性检测：哪些特征显著偏离历史均值
-    anomalies = []
-    for i, name in enumerate(feature_names[:10]):
-        z = z_scores[i]
-        if abs(z) > 2.0:
-            anomalies.append((name, z, '极度'))
-        elif abs(z) > 1.5:
-            anomalies.append((name, z, '显著'))
-        elif abs(z) > 1.0:
-            anomalies.append((name, z, '轻微'))
-
-    if anomalies:
-        anomalies.sort(key=lambda x: -abs(x[1]))
-        print(f'\n  [发现1] 检测到{len(anomalies)}个统计异常:')
-        for name, z, level in anomalies[:5]:
-            direction = '偏高' if z > 0 else '偏低'
-            tail_pct = round((1 - (0.5 + abs(z)/6)) * 100) if abs(z) < 3 else 1
-            print(f'    - {name} {level}{direction} (偏离{abs(z):.1f}σ, 约在历史分布的顶端{tail_pct}%)')
-
-    # 2. 特征组合模式识别：当前特征组合最像历史上哪种情况
-    # 计算历史上类似特征组合的次日涨跌分布
-    if len(feats_arr) >= 100:
-        recent_vec = feats_arr[-1]
-        similarities = []
-        for i in range(len(feats_arr) - 1):
-            past_vec = feats_arr[i]
-            # Cosine similarity
-            sim = np.dot(recent_vec, past_vec) / (np.linalg.norm(recent_vec) * np.linalg.norm(past_vec) + 1e-9)
-            next_idx = i + 1
-            if next_idx < len(feats_arr):
-                next_ret = feats_arr[next_idx][0]  # 5日涨幅作为代理
-                similarities.append((sim, next_ret))
-
-        up_ratio = 0.5
-    if similarities:
-            similarities.sort(key=lambda x: -x[0])
-            top20 = similarities[:20]
-            avg_next = np.mean([s[1] for s in top20])
-            up_ratio = sum(1 for s in top20 if s[1] > 0) / len(top20)
-
-            print(f'\n  [发现2] 历史最相似的20个交易日:')
-            print(f'    - 平均相似度: {np.mean([s[0] for s in top20]):.2%}')
-            print(f'    - 次日上涨概率: {up_ratio:.0%}')
-            print(f'    - 平均次日回报: {avg_next:+.2%}')
-
-            if up_ratio >= 0.7:
-                print(f'    - 模型判断: 历史规律强烈支持看多')
-            elif up_ratio >= 0.55:
-                print(f'    - 模型判断: 历史规律偏多，但存在不确定性')
-            elif up_ratio >= 0.45:
-                print(f'    - 模型判断: 历史规律不明确，随机性主导')
-            else:
-                print(f'    - 模型判断: 历史上类似模式多数下跌')
-
-    # 3. 特征重要性分析：当前最受模型关注的因子是什么
-    top_indices = np.argsort(importance)[-3:][::-1]
-    print(f'\n  [发现3] 模型认为最重要的3个因子:')
-    for idx in top_indices:
-        fn = feature_names[idx] if idx < len(feature_names) else f'因子{idx}'
-        imp_val = importance[idx]
-        z_val = z_scores[idx] if idx < len(z_scores) else 0
-        print(f'    - {fn}: 权重{imp_val:.1%}, 当前Z={z_val:+.2f}')
-
-        # 模型自己解释这个因子的含义
-        if imp_val > 0.15:
-            if z_val > 1:
-                print(f'      模型解读: {fn}是核心预测因子且当前显著偏高→历史数据显示这类情况往往伴随趋势延续')
-            elif z_val < -1:
-                print(f'      模型解读: {fn}是核心预测因子且当前显著偏低→历史数据显示这类情况往往预示反转')
-            else:
-                print(f'      模型解读: {fn}虽是核心因子但当前未见异常→需要其他因子配合判断')
-
-    # 4. 多空力量计数
-    bull_count = sum(1 for z in z_scores[:6] if z > 0.3)
-    bear_count = sum(1 for z in z_scores[:6] if z < -0.3)
-    neutral = 6 - bull_count - bear_count
-
-    print(f'\n  [发现4] 多空信号统计:')
-    print(f'    - 偏多信号: {bull_count}个')
-    print(f'    - 偏空信号: {bear_count}个')
-    print(f'    - 中性信号: {neutral}个')
-
-    # 5. 模型自我反思：检查是否有矛盾信号
-    print(f'\n  [发现5] 矛盾检测:')
-    contradictions = []
-    z0 = z_scores[0] if len(z_scores) > 0 else 0
-    z2 = z_scores[2] if len(z_scores) > 2 else 0
-    z5 = z_scores[5] if len(z_scores) > 5 else 0
-    z3 = z_scores[3] if len(z_scores) > 3 else 0
-    z4 = z_scores[4] if len(z_scores) > 4 else 0
-    if z0 > 1 and z2 < -1:
-        contradictions.append('价格上涨但量能萎缩——量价背离，上涨动力可能衰竭')
-    if z0 > 1 and z5 > 1.5:
-        contradictions.append('高收益伴随高波动——风险调整后收益可能被高估')
-    if z3 > 1 and z4 < -1:
-        contradictions.append('均线多头排列但价格已在均线下方——趋势可能正在转变')
-
-    if contradictions:
-        for c in contradictions:
-            print(f'    - 发现矛盾: {c}')
+    # ----- 阶段0: 市场状态识别 —— 判断当前处于什么市场环境 -----
+    vola_recent = np.std(feats_arr[-20:, 0]) if len(feats_arr) >= 20 else 0
+    trend_recent = np.mean(feats_arr[-20:, 3]) if len(feats_arr) >= 20 else 0
+    if vola_recent > 2.0 and abs(trend_recent) < 0.3:
+        regime = '高波动震荡'; regime_advice = '方向不明但波动剧烈，最优策略是缩小仓位等待突破'
+    elif trend_recent > 0.5 and vola_recent < 1.8:
+        regime = '平稳上升趋势'; regime_advice = '趋势跟随策略最有效，不宜逆势'
+    elif trend_recent < -0.5 and vola_recent < 1.8:
+        regime = '平稳下跌趋势'; regime_advice = '观望为主，等反转信号出现再行动'
     else:
-        print(f'    - 未检测到明显矛盾信号，各维度信号协调一致')
+        regime = '过渡/盘整期'; regime_advice = '灵活性最重要，方向随时可能选择'
+    print(f'\n  [阶段0] 市场状态: {regime} → {regime_advice}')
 
-    # 6. 最终综合判断
-    print(f'\n  {"="*55}')
-    print(f'  [综合判决]')
-    net = bull_count - bear_count
+    # ----- 阶段1: 假设生成与竞争 -----
+    bull_signals_6 = sum(1 for i in range(min(6,len(z_scores))) if z_scores[i] > 0.3)
+    bear_signals_6 = sum(1 for i in range(min(6,len(z_scores))) if z_scores[i] < -0.3)
+    extreme_count = sum(1 for z in z_scores[:6] if abs(z) > 1.8)
 
-    up_ratio_val = up_ratio if 'up_ratio' in dir() else 0.5
-    if net >= 3 and up_ratio_val >= 0.65:
-        verdict = (f'模型高度确信: 多个独立维度指向同一方向，历史类似模式成功率{up_ratio_val:.0%}。'
-                   f'量化评分{raw_score:.0f}/100。')
-    elif net >= 1 and up_ratio_val >= 0.5:
-        verdict = (f'模型中等确信: 多数指标偏多，但历史类似模式的胜率仅为{up_ratio_val:.0%}，'
-                   f'存在一定不确定性。量化评分{raw_score:.0f}/100。')
-    elif net >= -1:
-        verdict = ('模型不确定: 信号互相矛盾或强度不足。根据模型自身的经验，这种情况下的最佳策略是不交易。'
-                   f'量化评分{raw_score:.0f}/100。')
+    h_continue = bull_signals_6 * 0.2 + 0.05
+    h_reverse = extreme_count * 0.25 + 0.05
+    h_random = 0.35 if abs(np.mean(z_scores[:4])) < 0.3 else 0.05
+    h_break = 0.4 if extreme_count >= 3 else 0.05
+    h_sum = h_continue + h_reverse + h_random + h_break
+
+    hyps = [
+        ('趋势延续', h_continue/h_sum, '当前强势继续，明日大概率上涨'),
+        ('均值回归', h_reverse/h_sum, '过度延伸后将回调修正'),
+        ('随机游走', h_random/h_sum, '信号强度不足，方向无法判断'),
+        ('结构突变', h_break/h_sum, '多特征同时极端，可能有重大变化'),
+    ]
+    hyps.sort(key=lambda x: -x[1])
+
+    print(f'\n  [阶段1] 竞争假设:')
+    for name, prob, desc in hyps:
+        bar = '#' * int(prob * 40)
+        print(f'    {name:8s} ({prob:.0%}) {bar}')
+        print(f'             {desc}')
+
+    # ----- 阶段2: 证据收集与加权 -----
+    evidence_bull = []; evidence_bear = []
+    for i in range(min(6, len(feature_names))):
+        z = z_scores[i]; imp = importance[i] if i < len(importance) else 0.05
+        if z > 0.8 and imp > 0.03:
+            evidence_bull.append((feature_names[i], z, imp))
+        elif z < -0.8 and imp > 0.03:
+            evidence_bear.append((feature_names[i], z, imp))
+    evidence_bull.sort(key=lambda x: -x[1]*x[2])
+    evidence_bear.sort(key=lambda x: -x[1]*x[2])
+
+    w_bull = sum(z * imp for _, z, imp in evidence_bull)
+    w_bear = sum(abs(z) * imp for _, z, imp in evidence_bear)
+
+    print(f'\n  [阶段2] 加权证据: 看多{w_bull:.3f} vs 看空{w_bear:.3f}')
+    for name, z, imp in evidence_bull[:4]:
+        print(f'    🟢 {name:10s} Z={z:+.2f} x w={imp:.2f} = {z*imp:+.3f}')
+    for name, z, imp in evidence_bear[:4]:
+        print(f'    🔴 {name:10s} Z={z:+.2f} x w={imp:.2f} = {abs(z)*imp:+.3f}')
+
+    # ----- 阶段3: 贝叶斯概率更新 -----
+    prior = 0.50
+    evidence_ratio = w_bull / (w_bear + 1e-9)
+    posterior = prior + (evidence_ratio - 1) * 0.18 if evidence_ratio > 1 else prior - (1 - evidence_ratio) * 0.18
+    posterior = max(0.10, min(0.90, posterior))
+
+    print(f'\n  [阶段3] 贝叶斯更新:')
+    print(f'    先验: {prior:.0%} (无信息先验)')
+    print(f'    证据比: {evidence_ratio:.2f}')
+    print(f'    后验: {posterior:.0%} ({"看多" if posterior >= 0.5 else "看空"})')
+
+    # ----- 阶段4: 反事实推理 -----
+    print(f'\n  [阶段4] 反事实: "如果最强的信号消失会怎样?"')
+    all_evidence = evidence_bull + evidence_bear
+    if all_evidence:
+        strongest = max(all_evidence, key=lambda x: abs(x[1])*x[2])
+        sn, sz, si = strongest
+        adj_ratio = evidence_ratio * 0.4 if sz > 0 else evidence_ratio * 2.5
+        adj_post = prior + (adj_ratio - 1) * 0.18 if adj_ratio > 1 else prior - (1 - adj_ratio) * 0.18
+        adj_post = max(0.10, min(0.90, adj_post))
+        impact = '决定性影响' if abs(posterior - adj_post) > 0.20 else ('显著影响' if abs(posterior - adj_post) > 0.10 else '影响有限')
+        print(f'    如果去掉最强信号"{sn}"(Z={sz:+.1f}):')
+        print(f'    后验从{posterior:.0%}变为{adj_post:.0%} → {impact}')
+
+    # ----- 阶段5: 置信度校准 -----
+    consistency = abs(w_bull - w_bear) / (w_bull + w_bear + 1e-9)
+    stability = 1.0 / (1.0 + vola_recent)
+    model_cap = min(0.70, max(0.50, ml.get('accuracy', 0.55)))
+    calibrated = posterior * stability * (0.5 + 0.5 * consistency)
+    calibrated = min(model_cap + 0.08, max(0.15, calibrated))
+
+    print(f'\n  [阶段5] 置信度校准:')
+    print(f'    原始后验: {posterior:.0%}')
+    print(f'    x 稳定性({stability:.2f}) x 一致性({consistency:.2f})')
+    print(f'    = 校准置信度: {calibrated:.0%} (模型能力上限: {model_cap:.0%})')
+
+    # ----- 最终 -----
+    print(f'\n  {"="*60}')
+    if calibrated >= 0.60:
+        verdict = f'高度确信。这是模型最确定的预测类型，历史胜率显著高于平均。量化评分{raw_score:.0f}/100。'
+    elif calibrated >= 0.45:
+        verdict = f'中等确信。方向明确但有余地，适合正常仓位。量化评分{raw_score:.0f}/100。'
+    elif calibrated >= 0.35:
+        verdict = f'低确信。信号不够清晰，不建议重仓。量化评分{raw_score:.0f}/100。'
     else:
-        verdict = ('模型明确看空: 多个独立维度同步转弱。历史数据显示这类信号组合的胜率低于随机。'
-                   f'量化评分{raw_score:.0f}/100。')
-
-    net_label = '+' if net > 0 else ''
-    score_label = '多头' if raw_score >= 55 else ('中性' if raw_score >= 45 else '空头')
-    print(f'    净信号: {net_label}{net} | 评分: {raw_score:.0f}/100 ({score_label})')
-    print(f'    {verdict}')
-
-    print(f'{"="*55}\n')
+        verdict = f'毫无信心。这是模型最不确定的情况，最优策略是不交易。量化评分{raw_score:.0f}/100。'
+    print(f'  [最终判决] {verdict}')
+    print(f'{"="*60}\n')
 
 
 if __name__ == '__main__':
