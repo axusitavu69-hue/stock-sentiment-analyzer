@@ -6,3 +6,4 @@ stock_reports/
 *.png
 *.json
 /tmp/
+kline_cache/
