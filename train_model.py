@@ -692,14 +692,48 @@ def show_status():
 
 # ===================== 入口 =====================
 
+def record_feedback(fb_str):
+    """记录预测反馈: python train_model.py --feedback 000001:1"""
+    code, result = fb_str.split(':')
+    code = code.strip().zfill(6)
+    correct = result.strip() == '1'
+
+    tracker_path = QUANT_TRACKER
+    if not os.path.exists(tracker_path):
+        print('未找到模型文件')
+        return
+
+    tracker = json.load(open(tracker_path, 'r', encoding='utf-8'))
+    history = tracker.get('prediction_history', [])
+    updated = 0
+    for p in reversed(history):
+        if p.get('code') == code and p.get('correct') is None:
+            p['correct'] = correct
+            updated += 1
+            # Only update the most recent one
+            break
+
+    if updated:
+        with open(tracker_path, 'w', encoding='utf-8') as f:
+            json.dump(tracker, f, ensure_ascii=False, indent=2)
+        print(f'{code}: 反馈已记录({"正确" if correct else "错误"})')
+        # Show current accuracy
+        all_preds = [p for p in history if p.get('correct') is not None]
+        if all_preds:
+            acc = sum(1 for p in all_preds if p['correct']) / len(all_preds)
+            print(f'累计预测{len(all_preds)}次, 准确率{acc:.0%}')
+    else:
+        print(f'{code}: 未找到待验证的预测记录')
+
+
 def main():
-    parser = argparse.ArgumentParser(description='量化模型训练系统 v2.0')
     parser.add_argument('--daily',   action='store_true', help='每日增量学习')
     parser.add_argument('--retrain', action='store_true', help='清空缓存重新全量训练')
     parser.add_argument('--evolve',  action='store_true', help='仅因子进化检查')
     parser.add_argument('--status',  action='store_true', help='查看模型状态')
     parser.add_argument('--predict', action='store_true', help='用已训练模型预测今日涨停股')
     parser.add_argument('--predict-code', type=str, help='预测指定股票代码')
+    parser.add_argument('--feedback', type=str, help='反馈预测结果, 格式: 代码:对/错, 例如 000001:1 或 000001:0')
     args = parser.parse_args()
 
     if args.status:
@@ -716,6 +750,10 @@ def main():
 
     if args.predict_code:
         predict_one(args.predict_code)
+        return
+
+    if args.feedback:
+        record_feedback(args.feedback)
         return
 
     if args.daily:
@@ -981,6 +1019,68 @@ def predict_one(code):
     print(f'    原始后验: {posterior:.0%}')
     print(f'    x 稳定性({stability:.2f}) x 一致性({consistency:.2f})')
     print(f'    = 校准置信度: {calibrated:.0%} (模型能力上限: {model_cap:.0%})')
+
+    # ----- 阶段6: 记忆追溯 —— 检查过去类似预测的准确率 -----
+    print(f'\n  [阶段6] 记忆库检索:')
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
+    pred_history = tracker.get('prediction_history', [])
+
+    if len(pred_history) >= 10:
+        # Find similar past predictions using feature vector similarity
+        similar_past = []
+        cur_vec = feats_arr[-1][:6]  # Use first 6 features as fingerprint
+        for past in pred_history:
+            if 'features' in past and 'correct' in past:
+                past_vec = np.array(past['features'][:6])
+                sim = np.dot(cur_vec, past_vec) / (np.linalg.norm(cur_vec) * np.linalg.norm(past_vec) + 1e-9)
+                if sim > 0.6:
+                    similar_past.append({'sim': sim, 'correct': past['correct'], 'date': past.get('date','')})
+
+        if similar_past:
+            similar_past.sort(key=lambda x: -x['sim'])
+            top = similar_past[:15]
+            past_accuracy = sum(1 for t in top if t['correct']) / len(top)
+            days_ago = '多次' if len(top) >= 10 else f'{len(top)}次'
+
+            print(f'    找到{len(similar_past)}个历史相似案例(相似度>60%)')
+            print(f'    其中最相似的{len(top)}次预测，实际准确率: {past_accuracy:.0%}')
+            print(f'    最近相似案例日期: {top[0]["date"] if top else "无"}')
+
+            # Adjust confidence based on track record
+            if past_accuracy >= 0.70:
+                calibrated = min(model_cap + 0.10, calibrated * 1.10)
+                print(f'    历史表现优异 → 置信度上调至 {calibrated:.0%}')
+            elif past_accuracy <= 0.35:
+                calibrated = max(0.10, calibrated * 0.70)
+                print(f'    历史表现差 → 置信度下调至 {calibrated:.0%}')
+            elif abs(past_accuracy - 0.50) < 0.10:
+                print(f'    历史准确率接近随机 → 置信度不变')
+        else:
+            print(f'    未找到足够相似的历史案例(相似度>60%)')
+            print(f'    这是一个新颖的信号组合，模型没有足够经验')
+            past_accuracy = None
+    else:
+        print(f'    记忆库不足({len(pred_history)}条)，多预测几次后模型会积累经验')
+        past_accuracy = None
+
+    # Save this prediction for future learning
+    prediction_entry = {
+        'date': datetime.now().strftime('%Y%m%d'),
+        'code': code,
+        'posterior': round(float(posterior), 3),
+        'calibrated': round(float(calibrated), 3),
+        'direction': 'bull' if posterior >= 0.5 else 'bear',
+        'features': latest[:6].tolist(),
+        'correct': None  # to be filled in next day
+    }
+    if 'prediction_history' not in tracker:
+        tracker['prediction_history'] = []
+    tracker['prediction_history'].append(prediction_entry)
+    # Keep last 500 predictions
+    if len(tracker['prediction_history']) > 500:
+        tracker['prediction_history'] = tracker['prediction_history'][-500:]
+    with open(QUANT_TRACKER, 'w', encoding='utf-8') as f:
+        json.dump(tracker, f, ensure_ascii=False, indent=2)
 
     # ----- 最终 -----
     print(f'\n  {"="*60}')
