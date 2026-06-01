@@ -29,7 +29,7 @@ warnings.filterwarnings('ignore')
 TRAINING_DAYS   = 365          # 改为1年
 TARGET_STOCKS   = 2500         # 目标股票数
 BATCH_SIZE      = 50           # 并发批次大小（每批最多同时发50个请求）
-MAX_WORKERS     = 2            # Baostock不宜高并发，2个线程最稳
+MAX_WORKERS     = 1            # 单线程最稳，避免socket冲突
 CACHE_DIR       = "kline_cache"  # K线本地缓存目录
 MODEL_DIR       = "stock_reports"
 QUANT_TRACKER   = f"{MODEL_DIR}/quant_tracker.json"
@@ -129,46 +129,23 @@ except ImportError:
 
 
 def _fetch_one(code: str, days: int) -> tuple:
-    """单只股票获取K线（含缓存），异常保底返回空"""
+    """单只股票获取K线（含缓存）"""
+    cached = _load_cache(code, days)
+    if cached is not None:
+        return code, cached
+
+    df = None
     try:
-        # 先查缓存
-        cached = _load_cache(code, days)
-        if cached is not None:
-            return code, cached
-
+        import io, contextlib
+        with contextlib.redirect_stderr(io.StringIO()):  # 压制Baostock socket报错
+            from eastmoney_api import get_kline as gk
+            df = gk(code, days)
+    except:
         df = None
-        if _HAS_EM:
-            try:
-                df = em_get_kline(code, days)
-            except BaseException:
-                df = None
 
-        if df is None or (hasattr(df, 'empty') and df.empty):
-            try:
-                import akshare as ak
-                end_dt = datetime.now().strftime('%Y%m%d')
-                start_dt = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
-                raw = ak.stock_zh_a_hist(
-                    symbol=code, period='daily',
-                    start_date=start_dt, end_date=end_dt,
-                    adjust='qfq'
-                )
-                if raw is not None and not raw.empty:
-                    col_map = {
-                        '日期': 'date', '开盘': 'open', '收盘': 'close',
-                        '最高': 'high', '最低': 'low', '成交量': 'volume',
-                        '成交额': 'amount', '涨跌幅': 'pct_chg'
-                    }
-                    raw.rename(columns=col_map, inplace=True)
-                    df = raw.tail(days)
-            except BaseException:
-                df = None
-
-        if df is not None and not (hasattr(df, 'empty') and df.empty):
-            _save_cache(code, days, df)
-        return code, df
-    except BaseException:
-        return code, None
+    if df is not None and not (hasattr(df, 'empty') and df.empty) and len(df) >= 40:
+        _save_cache(code, days, df)
+    return code, df
 
 
 def fetch_kline_batch_concurrent(codes: list, days: int = TRAINING_DAYS) -> dict:
