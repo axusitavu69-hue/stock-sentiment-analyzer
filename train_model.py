@@ -931,7 +931,8 @@ def predict_one(code):
                 next_ret = feats_arr[next_idx][0]  # 5日涨幅作为代理
                 similarities.append((sim, next_ret))
 
-        if similarities:
+        up_ratio = 0.5
+    if similarities:
             similarities.sort(key=lambda x: -x[0])
             top20 = similarities[:20]
             avg_next = np.mean([s[1] for s in top20])
@@ -982,11 +983,16 @@ def predict_one(code):
     # 5. 模型自我反思：检查是否有矛盾信号
     print(f'\n  [发现5] 矛盾检测:')
     contradictions = []
-    if ret_5d_z > 1 and z_scores[2] < -1:
+    z0 = z_scores[0] if len(z_scores) > 0 else 0
+    z2 = z_scores[2] if len(z_scores) > 2 else 0
+    z5 = z_scores[5] if len(z_scores) > 5 else 0
+    z3 = z_scores[3] if len(z_scores) > 3 else 0
+    z4 = z_scores[4] if len(z_scores) > 4 else 0
+    if z0 > 1 and z2 < -1:
         contradictions.append('价格上涨但量能萎缩——量价背离，上涨动力可能衰竭')
-    if ret_5d_z > 1 and z_scores[5] > 1.5:
+    if z0 > 1 and z5 > 1.5:
         contradictions.append('高收益伴随高波动——风险调整后收益可能被高估')
-    if trend_z > 1 and ma_dev_z < -1:
+    if z3 > 1 and z4 < -1:
         contradictions.append('均线多头排列但价格已在均线下方——趋势可能正在转变')
 
     if contradictions:
