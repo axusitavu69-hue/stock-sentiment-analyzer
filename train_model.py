@@ -889,9 +889,123 @@ def predict_one(code):
         print(f'    {color} {name:10s} {bar} (Z={z:+.2f}, 权重{importance[i]:.1%})')
 
     # 近期趋势
-    recent_5 = feats_arr[-5:, 0]  # 5日涨幅  index 0
+    recent_5 = feats_arr[-5:, 0]
     trend_5d = '上升' if np.mean(recent_5) > 0 else '下降'
     print(f'\n  近5日动量: {trend_5d}')
+
+    # ========== AI推理引擎 ==========
+    print(f'\n  {"="*50}')
+    print(f'  [AI推理引擎] 思考过程')
+    print(f'  {"="*50}')
+
+    thoughts = []
+    signals_bull = []
+    signals_bear = []
+
+    # Step 1: 动量分析
+    ret_5d_z = z_scores[0]
+    ret_20d_z = z_scores[1]
+    if ret_5d_z > 1.5 and ret_20d_z > 1:
+        thoughts.append(f'1. 短期和中期动量同时极度亢奋(Z_5d={ret_5d_z:.1f}, Z_20d={ret_20d_z:.1f})。'
+                       f'利弗莫尔会说"趋势是你的朋友"，但CIS会提醒"涨太快的东西跌起来也快"。'
+                       f'结论：短期强势但追高风险大，建议等待回调。')
+        signals_bull.append('短期动量'); signals_bear.append('过度延伸')
+    elif ret_5d_z > 0.5 and ret_20d_z > 0.3:
+        thoughts.append(f'1. 动量健康向上(Z_5d={ret_5d_z:.1f}, Z_20d={ret_20d_z:.1f})。'
+                       f'趋势确认向上，未出现过度延伸。这是最理想的趋势跟随状态。')
+        signals_bull.append('趋势健康')
+    elif ret_5d_z < -1 and ret_20d_z < -0.5:
+        thoughts.append(f'1. 短期和中期动量同时转弱(Z_5d={ret_5d_z:.1f}, Z_20d={ret_20d_z:.1f})。'
+                       f'利弗莫尔的核心法则："当火车驶来时，不要站在铁轨上"。趋势已经转向。')
+        signals_bear.append('趋势转弱')
+    else:
+        thoughts.append(f'1. 动量信号分歧(Z_5d={ret_5d_z:.1f}, Z_20d={ret_20d_z:.1f})。'
+                       f'短期和中期趋势不一致，市场处于犹豫状态。CIS会说"在方向明朗之前减少下注"。')
+
+    # Step 2: 成交量分析
+    vol_z = z_scores[2] if len(z_scores) > 2 else 0
+    if vol_z > 1.5:
+        thoughts.append(f'2. 成交量异常放大(Z_vol={vol_z:.1f})。可能是主力资金大举进场，'
+                       f'也可能是高位换手出货。结合趋势方向判断：{"配合上涨，大概率是增量资金" if ret_5d_z > 0 else "配合下跌，警惕出货"}。')
+        signals_bull.append('放量') if ret_5d_z > 0 else signals_bear.append('放量下跌')
+    elif vol_z < -1:
+        thoughts.append(f'2. 成交量极度萎缩(Z_vol={vol_z:.1f})。市场关注度下降，'
+                       f'流动性不足可能导致剧烈波动。利弗莫尔会远离这种"死水"。')
+        signals_bear.append('缩量')
+    else:
+        thoughts.append(f'2. 成交量处于正常范围(Z_vol={vol_z:.1f})。市场参与度适中，没有异常信号。')
+
+    # Step 3: 趋势方向与均线
+    trend_z = z_scores[3] if len(z_scores) > 3 else 0
+    ma_dev_z = z_scores[4] if len(z_scores) > 4 else 0
+    if trend_z > 0.8 and ma_dev_z > 0.5:
+        thoughts.append(f'3. 均线系统多头排列(Z_trend={trend_z:.1f})，股价站上均线。'
+                       f'技术面上典型的强势特征。利弗莫尔会认为"这是股票在告诉你它想上涨"。')
+        signals_bull.append('多头排列')
+    elif trend_z < -0.5:
+        thoughts.append(f'3. 均线系统偏空(Z_trend={trend_z:.1f})。短期均线在长期均线之下，'
+                       f'反弹可能只是暂时的。CIS的经验："不要试图接住掉下来的刀"。')
+        signals_bear.append('空头排列')
+    else:
+        thoughts.append(f'3. 均线系统缠绕(Z_trend={trend_z:.1f})。多空力量暂时均衡，'
+                       f'等待方向选择。这时候最好的策略是观望。')
+
+    # Step 4: 波动率与风险
+    vola_z = z_scores[5] if len(z_scores) > 5 else 0
+    if vola_z > 1.5:
+        thoughts.append(f'4. 波动率急剧上升(Z_vola={vola_z:.1f})。不确定性增加，'
+                       f'风险溢价扩大。CIS的交易铁律："当市场变得不稳定时，减仓是第一反应"。')
+        signals_bear.append('波动率过高')
+    elif vola_z < -0.5:
+        thoughts.append(f'4. 波动率处于低位(Z_vola={vola_z:.1f})。市场情绪稳定，'
+                       f'有利于趋势延续。这是利弗莫尔喜欢的"安静的牛市"。')
+        signals_bull.append('低波动')
+    else:
+        thoughts.append(f'4. 波动率正常(Z_vola={vola_z:.1f})。市场风险可控，按照正常策略执行即可。')
+
+    # Step 5: 今日涨停数据分析
+    if stock_info is not None:
+        lb = int(stock_info.get('连板数', 1) or 1)
+        zc = int(stock_info.get('炸板次数', 0) or 0)
+        if lb >= 3 and zc == 0:
+            thoughts.append(f'5. 今日{lb}连板且零炸板——这是最强的涨停形态。'
+                           f'利弗莫尔会将此视为"关键点突破并得到确认"，CIS会认为"群体共识极度统一"。'
+                           f'但需注意：连板越高，断板风险越大。建议金字塔加仓（越涨买越少）。')
+            signals_bull.append(f'{lb}连板')
+        elif lb >= 2:
+            thoughts.append(f'5. 今日{lb}连板，有一定延续性。市场对该股的关注度在提升，'
+                           f'但尚未形成极致共识。如果明日继续涨停，则确认强势。')
+            signals_bull.append(f'{lb}连板')
+        elif zc > 0:
+            thoughts.append(f'5. 今日炸板{zc}次，这是最危险的信号之一。'
+                           f'CIS会立即清仓："炸板说明有人在大举出货，跟风盘正在被收割"。'
+                           f'利弗莫尔会说："当股票表现异常时，不要问为什么，先离场"。')
+            signals_bear.append(f'炸板{zc}次')
+
+    # Step 6: 综合推理
+    bull_count = len(signals_bull)
+    bear_count = len(signals_bear)
+    print(f'\n  --- 综合推理 ---')
+    print(f'  看多信号({bull_count}): {", ".join(signals_bull) if signals_bull else "无"}')
+    print(f'  看空信号({bear_count}): {", ".join(signals_bear) if signals_bear else "无"}')
+
+    net = bull_count - bear_count
+    if net >= 3:
+        conclusion = ('多重信号共振看多。利弗莫尔和CIS都会认为这是一个值得参与的setup。'
+                     f'建议：正常仓位介入，止损设在今日最低价下方2%。')
+    elif net >= 1:
+        conclusion = ('偏多但存在瑕疵。利弗莫尔会说"等待股票自己证明自己"，'
+                     f'建议：半仓试探，如果明日继续走强再加仓。')
+    elif net >= -1:
+        conclusion = ('多空信号均衡，市场处于不确定状态。CIS会说"这是应该坐在手上的时候"。'
+                     f'建议：观望为主，等待更明确的信号再入场。')
+    else:
+        conclusion = ('空头信号明显多于多头。两位大师都会回避这种setup。'
+                     f'利弗莫尔："有时候最好的交易就是不交易"。建议：场外等待。')
+
+    for t in thoughts:
+        print(f'\n  {t}')
+    print(f'\n  [最终决策] {conclusion}')
 
     print(f'{"="*50}\n')
 
