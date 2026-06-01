@@ -852,24 +852,16 @@ def predict_one(code):
     importance = np.array(ml.get('feature_importance', [1]*len(feature_names)))
     importance = importance / importance.sum()
 
-    # 用最新20条特征的均值 vs 最新值判断趋势
+    # Z-score
     recent_mean = feats_arr[-20:].mean(axis=0)
     recent_std = feats_arr[-20:].std(axis=0) + 1e-9
-
-    # Z-score: 当前特征相对近期均值的偏离
     z_scores = (latest - recent_mean) / recent_std
-    weighted_score = np.sum(z_scores * importance) * 100
-
-    # 综合评分
-    raw_score = np.clip(50 + weighted_score, 0, 100)
 
     print(f'\n{"="*50}')
     print(f'  {code} 量化预测报告')
     print(f'{"="*50}')
     print(f'  模型准确率: {ml.get("accuracy",0):.1%}')
     print(f'  训练样本: {ml.get("samples",0):,}条')
-    print(f'  原始评分: {raw_score:.1f}/100')
-    print(f'  (明日预判见下方推理引擎综合判决)')
 
     # 涨停数据
     if stock_info is not None:
@@ -992,35 +984,24 @@ def predict_one(code):
 
     # ----- 最终 -----
     print(f'\n  {"="*60}')
-    # 方向判定：只有当证据一致性足够高时才给出方向
-    if consistency < 0.15:
-        # 证据几乎均等 → 无法判断
+    if consistency < 0.12:
         direction = '无法判断'
-        verdict = '证据几乎均等，多空双方都没有优势。今天不是交易的好时机。'
+        verdict = '多空证据接近均等，模型选择不预测。"不交易"本身就是一个有效决策。'
     elif calibrated >= 0.60:
         direction = '看多' if posterior >= 0.5 else '看空'
-        verdict = f'{direction} | 高度确信 | 模型最有把握的预测类型'
+        verdict = f'{direction} | 高度确信 | 证据充分且一致，模型最有把握的预测类型'
     elif calibrated >= 0.45:
         direction = '看多' if posterior >= 0.5 else '看空'
-        verdict = f'{direction} | 中等确信 | 方向明确但有余地'
+        verdict = f'{direction} | 中等确信 | 方向明确，适合正常仓位'
     elif calibrated >= 0.35:
         direction = '看多' if posterior >= 0.5 else '看空'
-        verdict = f'{direction} | 低确信 | 不建议重仓参与'
+        verdict = f'{direction} | 低确信 | 信号不足，轻仓或观望'
     else:
         direction = '无法判断'
-        verdict = '证据强度不足以支持方向判断。模型选择不预测——"不交易"本身就是一个决策。'
+        verdict = '证据强度和一致性均不足。模型拒绝给出方向。'
 
     print(f'  [最终判决] {verdict}')
-    print(f'  原始评分: {raw_score:.0f}/100 | 校准置信度: {calibrated:.0%}')
-
-    # 警告：表面分数和真实把握背离
-    gap = abs(raw_score / 100 - calibrated)
-    if gap > 0.25:
-        print(f'  [注意] 表面评分与真实把握有较大差距')
-        if raw_score > 60 and calibrated < 0.40:
-            print(f'  评分偏高但证据不足→别被表面数字骗了')
-        elif raw_score < 40 and calibrated > 0.50:
-            print(f'  评分偏低但证据稳定→可能存在被低估的机会')
+    print(f'  后验概率: {posterior:.0%} | 校准置信度: {calibrated:.0%}')
     print(f'{"="*60}\n')
 
 
