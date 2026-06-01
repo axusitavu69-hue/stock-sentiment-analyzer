@@ -806,10 +806,12 @@ def predict_one(code):
 
     code = code.strip().zfill(6)
     if not code.isdigit() or len(code) != 6:
-        print(f'错误: "{code}" 不是有效的A股代码（需要6位数字）')
+        print(f'错误: "{code}" 不是有效的代码（需要6位数字）')
         return
-    if not (code.startswith(('0','3','6'))):
-        print(f'错误: "{code}" 不是有效的A股代码（需以0/3/6开头）')
+    is_fund = code.startswith(('1','5'))
+    is_stock = code.startswith(('0','3','6','4','8'))
+    if not (is_stock or is_fund):
+        print(f'错误: "{code}" 不是有效的A股或基金代码')
         return
 
     # 获取今日涨停数据

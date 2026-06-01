@@ -77,14 +77,20 @@ def get_limit_up_pool(date_str=None):
 
 
 def get_kline(code, market='sz', days=300):
-    """个股日K线 — AKShare stock_zh_a_daily（HTTP稳定）"""
+    """个股日K线 — AKShare stock_zh_a_daily + 基金适配"""
     import akshare as ak
+
+    # Determine market prefix
+    if code.startswith('6') or code.startswith('5'):
+        prefix = 'sh' + code
+    else:
+        prefix = 'sz' + code
+
     try:
-        prefix = 'sh' + code if code.startswith('6') else 'sz' + code
         ed = datetime.now().strftime('%Y%m%d')
         sd = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
         df = ak.stock_zh_a_daily(symbol=prefix, start_date=sd, end_date=ed, adjust='qfq')
-        if df is not None and not df.empty and len(df) >= 40:
+        if df is not None and not df.empty and len(df) >= 20:
             col_map = {}
             for k, v in {'date':'date','open':'open','high':'high','low':'low','close':'close',
                          'volume':'volume','amount':'amount','turn':'turnover','pctChg':'pct_chg',
@@ -94,6 +100,44 @@ def get_kline(code, market='sz', days=300):
             return df.rename(columns=col_map)
     except:
         pass
+
+    # Fund fallback: try Baostock with both sh and sz prefix
+    if code.startswith(('1','5')):
+        import baostock as bs
+        import threading, queue
+        for bs_prefix in [f'sz.{code}', f'sh.{code}']:
+            q = queue.Queue()
+            def _try():
+                try:
+                    bs.login()
+                    end = datetime.now().strftime('%Y-%m-%d')
+                    start = (datetime.now() - timedelta(days=days + 30)).strftime('%Y-%m-%d')
+                    rs = bs.query_history_k_data_plus(bs_prefix,
+                        'date,open,high,low,close,volume,amount,turn,pctChg',
+                        start_date=start, end_date=end, frequency='d', adjustflag='2')
+                    if rs.error_code == '0':
+                        data = []
+                        while rs.next():
+                            data.append(rs.get_row_data())
+                        bs.logout()
+                        if data and len(data) >= 20:
+                            df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
+                            for c in ['open','high','low','close','volume','amount','turn','pctChg']:
+                                df[c] = pd.to_numeric(df[c], errors='coerce')
+                            q.put(df.dropna(subset=['close']))
+                            return
+                    bs.logout()
+                except: pass
+                q.put(None)
+            t = threading.Thread(target=_try, daemon=True)
+            t.start()
+            try:
+                result = q.get(timeout=10)
+                if result is not None:
+                    return result
+            except queue.Empty:
+                pass
+
     return pd.DataFrame()
 
 
