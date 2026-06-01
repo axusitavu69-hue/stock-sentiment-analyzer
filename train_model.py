@@ -29,7 +29,7 @@ warnings.filterwarnings('ignore')
 TRAINING_DAYS   = 365          # 改为1年
 TARGET_STOCKS   = 2500         # 目标股票数
 BATCH_SIZE      = 50           # 并发批次大小（每批最多同时发50个请求）
-MAX_WORKERS     = 1            # 单线程最稳，避免socket冲突
+MAX_WORKERS     = 5            # HTTP请求可并发
 CACHE_DIR       = "kline_cache"  # K线本地缓存目录
 MODEL_DIR       = "stock_reports"
 QUANT_TRACKER   = f"{MODEL_DIR}/quant_tracker.json"
@@ -136,10 +136,8 @@ def _fetch_one(code: str, days: int) -> tuple:
 
     df = None
     try:
-        import io, contextlib
-        with contextlib.redirect_stderr(io.StringIO()):  # 压制Baostock socket报错
-            from eastmoney_api import get_kline as gk
-            df = gk(code, days)
+        from eastmoney_api import get_kline as gk
+        df = gk(code, days)
     except:
         df = None
 

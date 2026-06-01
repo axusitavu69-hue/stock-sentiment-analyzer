@@ -77,54 +77,23 @@ def get_limit_up_pool(date_str=None):
 
 
 def get_kline(code, market='sz', days=300):
-    """个股日K线 — Baostock + 超时守护"""
-    import baostock as bs
-    import threading, queue
-
-    bs_code = f'sh.{code}' if code.startswith('6') else f'sz.{code}'
-    end = datetime.now().strftime('%Y-%m-%d')
-    start = (datetime.now() - timedelta(days=days + 30)).strftime('%Y-%m-%d')
-
-    result_queue = queue.Queue()
-
-    def _fetch_one():
-        try:
-            lg = bs.login()
-            if lg.error_code != '0':
-                result_queue.put(None); return
-            rs = bs.query_history_k_data_plus(
-                bs_code,
-                'date,open,high,low,close,volume,amount,turn,pctChg',
-                start_date=start, end_date=end,
-                frequency='d', adjustflag='2')
-            if rs.error_code != '0':
-                bs.logout(); result_queue.put(None); return
-            data = []
-            while rs.next():
-                data.append(rs.get_row_data())
-                if len(data) > 600: break  # safety limit
-            bs.logout()
-            if data and len(data) >= 40:
-                df = pd.DataFrame(data, columns=['date','open','high','low','close','volume','amount','turn','pctChg'])
-                for c in ['open','high','low','close','volume','amount','turn','pctChg']:
-                    df[c] = pd.to_numeric(df[c], errors='coerce')
-                result_queue.put(df.dropna(subset=['close']))
-            else:
-                result_queue.put(None)
-        except Exception:
-            try: bs.logout()
-            except: pass
-            result_queue.put(None)
-
-    t = threading.Thread(target=_fetch_one, daemon=True)
-    t.start()
+    """个股日K线 — AKShare stock_zh_a_daily（HTTP稳定）"""
+    import akshare as ak
     try:
-        result = result_queue.get(timeout=10)  # 10秒超时
-        if result is not None:
-            return result
-    except queue.Empty:
+        prefix = 'sh' + code if code.startswith('6') else 'sz' + code
+        ed = datetime.now().strftime('%Y%m%d')
+        sd = (datetime.now() - timedelta(days=days + 30)).strftime('%Y%m%d')
+        df = ak.stock_zh_a_daily(symbol=prefix, start_date=sd, end_date=ed, adjust='qfq')
+        if df is not None and not df.empty and len(df) >= 40:
+            col_map = {}
+            for k, v in {'date':'date','open':'open','high':'high','low':'low','close':'close',
+                         'volume':'volume','amount':'amount','turn':'turnover','pctChg':'pct_chg',
+                         '日期':'date','开盘':'open','最高':'high','最低':'low','收盘':'close',
+                         '成交量':'volume','成交额':'amount','换手率':'turnover','涨跌幅':'pct_chg'}.items():
+                if k in df.columns: col_map[k] = v
+            return df.rename(columns=col_map)
+    except:
         pass
-
     return pd.DataFrame()
 
 
