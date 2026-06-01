@@ -801,15 +801,99 @@ def predict_today():
 
 
 def predict_one(code):
-    """预测单只股票"""
-    df = fetch_kline_batch_concurrent([code], 180)
-    if code not in df:
+    """预测单只个股明日涨跌"""
+    import akshare as ak
+
+    # 获取今日涨停数据
+    today = datetime.now().strftime('%Y%m%d')
+    limit_df = ak.stock_zt_pool_em(date=today)
+    stock_info = None
+    if not limit_df.empty:
+        match = limit_df[limit_df['代码'].astype(str).str.strip() == code.strip()]
+        if not match.empty:
+            stock_info = match.iloc[0]
+
+    # 获取K线
+    print(f'获取 {code} K线数据...')
+    kline_data = fetch_kline_batch_concurrent([code], 180)
+    if code not in kline_data:
         print(f'{code}: 无法获取K线数据')
         return
-    feats, _ = extract_features(df[code])
+
+    # 提取特征
+    feats, lbls = extract_features(kline_data[code])
+    if not feats:
+        print(f'{code}: 特征提取失败')
+        return
+    feats_arr = np.array(feats)
+
+    # 读取模型
     tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
     ml = tracker.get('ml_model', {})
-    print(f'{code}: 模型准确率{ml.get("accuracy",0):.1%}, {len(feats)}条特征可用于评估')
+    if not ml:
+        print('模型未训练，先运行 python train_model.py')
+        return
+
+    # 计算最新特征值
+    latest = feats_arr[-1]
+    feature_names = ml.get('feature_names', FEATURE_NAMES)
+
+    # 基于模型特征重要性加权评分
+    importance = np.array(ml.get('feature_importance', [1]*len(feature_names)))
+    importance = importance / importance.sum()
+
+    # 用最新20条特征的均值 vs 最新值判断趋势
+    recent_mean = feats_arr[-20:].mean(axis=0)
+    recent_std = feats_arr[-20:].std(axis=0) + 1e-9
+
+    # Z-score: 当前特征相对近期均值的偏离
+    z_scores = (latest - recent_mean) / recent_std
+    weighted_score = np.sum(z_scores * importance) * 100
+
+    # 综合评分
+    raw_score = np.clip(50 + weighted_score, 0, 100)
+
+    print(f'\n{"="*50}')
+    print(f'  {code} 量化预测报告')
+    print(f'{"="*50}')
+    print(f'  模型准确率: {ml.get("accuracy",0):.1%}')
+    print(f'  训练样本: {ml.get("samples",0):,}条')
+    print(f'  量化评分: {raw_score:.1f}/100')
+
+    # 判断
+    if raw_score >= 70:
+        verdict = '强烈看多'
+    elif raw_score >= 55:
+        verdict = '偏多'
+    elif raw_score >= 45:
+        verdict = '震荡'
+    elif raw_score >= 30:
+        verdict = '偏空'
+    else:
+        verdict = '强烈看空'
+    print(f'  明日预判: {verdict}')
+
+    # 涨停数据
+    if stock_info is not None:
+        lb = int(stock_info.get('连板数', 1) or 1)
+        zc = int(stock_info.get('炸板次数', 0) or 0)
+        ft = stock_info.get('首次封板时间', '-')
+        print(f'  今日状态: {lb}连板 | 炸板{zc}次 | 封板{ft}')
+
+    # 特征分析
+    print(f'\n  特征偏离分析:')
+    for i, name in enumerate(feature_names[:8]):
+        z = z_scores[i]
+        bar = '↑' if z > 0.5 else ('↓' if z < -0.5 else '→')
+        color = '🟢' if z > 1 else ('🟡' if abs(z) < 0.5 else '🔴')
+        print(f'    {color} {name:10s} {bar} (Z={z:+.2f}, 权重{importance[i]:.1%})')
+
+    # 近期趋势
+    recent_5 = feats_arr[-5:, 0]  # 5日涨幅  index 0
+    trend_5d = '上升' if np.mean(recent_5) > 0 else '下降'
+    print(f'\n  近5日动量: {trend_5d}')
+
+    print(f'{"="*50}\n')
 
 
 if __name__ == '__main__':
