@@ -868,20 +868,8 @@ def predict_one(code):
     print(f'{"="*50}')
     print(f'  模型准确率: {ml.get("accuracy",0):.1%}')
     print(f'  训练样本: {ml.get("samples",0):,}条')
-    print(f'  量化评分: {raw_score:.1f}/100')
-
-    # 判断
-    if raw_score >= 70:
-        verdict = '强烈看多'
-    elif raw_score >= 55:
-        verdict = '偏多'
-    elif raw_score >= 45:
-        verdict = '震荡'
-    elif raw_score >= 30:
-        verdict = '偏空'
-    else:
-        verdict = '强烈看空'
-    print(f'  明日预判: {verdict}')
+    print(f'  原始评分: {raw_score:.1f}/100')
+    print(f'  (明日预判见下方推理引擎综合判决)')
 
     # 涨停数据
     if stock_info is not None:
@@ -1004,15 +992,17 @@ def predict_one(code):
 
     # ----- 最终 -----
     print(f'\n  {"="*60}')
+    direction = '看多' if posterior >= 0.5 else '看空'
     if calibrated >= 0.60:
-        verdict = f'高度确信。这是模型最确定的预测类型，历史胜率显著高于平均。量化评分{raw_score:.0f}/100。'
+        verdict = f'{direction} | 高度确信 | 历史胜率显著高于平均'
     elif calibrated >= 0.45:
-        verdict = f'中等确信。方向明确但有余地，适合正常仓位。量化评分{raw_score:.0f}/100。'
+        verdict = f'{direction} | 中等确信 | 方向明确但有余地'
     elif calibrated >= 0.35:
-        verdict = f'低确信。信号不够清晰，不建议重仓。量化评分{raw_score:.0f}/100。'
+        verdict = f'{direction} | 低确信 | 信号不够清晰，不建议重仓'
     else:
-        verdict = f'毫无信心。这是模型最不确定的情况，最优策略是不交易。量化评分{raw_score:.0f}/100。'
+        verdict = f'{direction} | 毫无信心 | 最优策略是不交易'
     print(f'  [最终判决] {verdict}')
+    print(f'  原始评分: {raw_score:.0f}/100 | 校准置信度: {calibrated:.0%}')
     print(f'{"="*60}\n')
 
 
