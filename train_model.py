@@ -1003,6 +1003,17 @@ def predict_one(code):
         verdict = f'{direction} | 毫无信心 | 最优策略是不交易'
     print(f'  [最终判决] {verdict}')
     print(f'  原始评分: {raw_score:.0f}/100 | 校准置信度: {calibrated:.0%}')
+
+    # 警告：表面分数和真实把握差距大时触发
+    gap = abs(raw_score / 100 - calibrated)
+    if gap > 0.25:
+        print(f'  [警告] 表面评分与真实把握严重背离！')
+        if raw_score > 60 and calibrated < 0.40:
+            print(f'  虽然原始信号偏多({raw_score:.0f}分)，但模型检测到高波动或不一致的证据，')
+            print(f'  认为这次预测不可靠。盲目追涨大概率被套。')
+        elif raw_score < 40 and calibrated > 0.50:
+            print(f'  虽然原始信号偏弱({raw_score:.0f}分)，但模型检测到稳定的证据结构，')
+            print(f'  认为存在被低估的机会。这可能是一个逆势的好买点。')
     print(f'{"="*60}\n')
 
 
