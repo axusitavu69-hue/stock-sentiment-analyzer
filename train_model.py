@@ -727,6 +727,7 @@ def record_feedback(fb_str):
 
 
 def main():
+    parser = argparse.ArgumentParser(description='量化模型训练系统 v2.0')
     parser.add_argument('--daily',   action='store_true', help='每日增量学习')
     parser.add_argument('--retrain', action='store_true', help='清空缓存重新全量训练')
     parser.add_argument('--evolve',  action='store_true', help='仅因子进化检查')
