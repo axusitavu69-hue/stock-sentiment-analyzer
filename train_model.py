@@ -580,7 +580,7 @@ def full_train():
     print(f'\n[4/4] 保存模型...')
     tracker = {}
     if os.path.exists(QUANT_TRACKER):
-        tracker = json.load(open(QUANT_TRACKER))
+        tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
     save_model_and_tracker(model, acc, importance, len(all_feats), trained, rounds, val_metrics)
 
@@ -639,13 +639,13 @@ def daily_learn():
     print(f'\n[3/3] 增量训练...')
     model, acc, importance, val_metrics = train_model_lgbm(all_feats, all_lbls, '每日增量')
 
-    tracker = json.load(open(QUANT_TRACKER)) if os.path.exists(QUANT_TRACKER) else {}
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
     prev_samples = tracker.get('ml_model', {}).get('samples', 0)
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
     save_model_and_tracker(model, acc, importance,
                            prev_samples + len(all_feats), trained, rounds, val_metrics)
 
-    print(f'\n  ✅ 今日学习完成！累计样本: {prev_samples + len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
+    print(f'\n  [OK] 今日学习完成! 累计样本: {prev_samples + len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
 
 
 def auto_evolve_factors():
@@ -653,7 +653,7 @@ def auto_evolve_factors():
     if not os.path.exists(QUANT_TRACKER):
         print('  [WARN] 无tracker文件，请先训练')
         return
-    tracker = json.load(open(QUANT_TRACKER))
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
     fp  = tracker.get('factor_pool', {})
     sig = fp.get('significance', {})
 
@@ -672,7 +672,7 @@ def show_status():
     if not os.path.exists(QUANT_TRACKER):
         print('  尚未训练，请运行: python train_model.py')
         return
-    tracker = json.load(open(QUANT_TRACKER))
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
     ml = tracker.get('ml_model', {})
     print('\n  ── 模型状态 ─────────────────────────────')
     print(f'  最后训练: {ml.get("trained_date", "N/A")}')
