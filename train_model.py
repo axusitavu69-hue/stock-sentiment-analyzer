@@ -620,7 +620,15 @@ def learn_all_normal():
     all_feats, all_lbls = [], []
     trained = 0; skipped = 0; from_api = 0; from_cache = 0
 
-    # 只用365d缓存文件确定股票列表，去重
+    # 清理非365d的缓存文件，防止重复计数
+    cleaned = 0
+    for fname in list(os.listdir(CACHE_DIR)):
+        if fname.endswith('.pkl') and '_365d' not in fname:
+            try: os.remove(os.path.join(CACHE_DIR, fname)); cleaned += 1
+            except: pass
+    if cleaned: print(f'  清理非365d缓存: {cleaned}个文件')
+
+    # 只用365d缓存确定股票列表，天然去重
     codes_set = set()
     for fname in os.listdir(CACHE_DIR):
         if fname.endswith('_365d.pkl'):
@@ -631,7 +639,7 @@ def learn_all_normal():
     non_limit_list = list(codes_set)
     random.shuffle(non_limit_list)
 
-    print(f'  非涨停股: {len(non_limit_list)}只（去重后）')
+    print(f'  非涨停股: {len(non_limit_list)}只')
 
     # 批量调API获取最新数据（只取最近5天，更新最后一天特征）
     batch_size = 100  # 大一点，少量数据请求快
