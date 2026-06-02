@@ -788,21 +788,36 @@ def daily_learn():
         if cached is not None and not (hasattr(cached, 'empty') and cached.empty) and len(cached) >= 80:
             klines[code] = cached.tail(100)
 
+    # 去重检查
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
+    trained_pairs = set()
+    for entry in tracker.get('trained_stocks', []):
+        trained_pairs.add((entry['code'], entry.get('last_date', '')))
+
     all_feats, all_lbls = [], []
-    trained_zt = 0; trained_normal = 0
+    trained_zt = 0; trained_normal = 0; skipped_dup = 0
     for code, df in klines.items():
         if df is not None and len(df) >= 80:
+            last_date = str(df['date'].max()) if 'date' in df.columns else ''
+            if (code, last_date) in trained_pairs:
+                skipped_dup += 1; continue
             feats, lbls = extract_features(df)
             if feats:
                 all_feats.extend(feats)
                 all_lbls.extend(lbls)
                 if code in limit_codes: trained_zt += 1
                 else: trained_normal += 1
+                tracker.setdefault('trained_stocks', []).append({'code': code, 'last_date': last_date})
+    if len(tracker.get('trained_stocks', [])) > 15000:
+        tracker['trained_stocks'] = tracker['trained_stocks'][-15000:]
 
-    print(f'  涨停股: {trained_zt}只, 普通股: {trained_normal}只, 特征: {len(all_feats)}条')
+    print(f'  涨停股: {trained_zt}只, 普通股: {trained_normal}只, 跳过重复: {skipped_dup}只, 特征: {len(all_feats)}条')
 
     if len(all_feats) < 200:
         print('  数据不足，跳过今日学习')
+        # 仍然保存trained_stocks以免丢失
+        with open(QUANT_TRACKER, 'w', encoding='utf-8') as f:
+            json.dump(tracker, f, ensure_ascii=False, indent=2)
         return
 
     # 4. 训练
