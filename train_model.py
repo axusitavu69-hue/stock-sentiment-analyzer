@@ -142,7 +142,8 @@ def _fetch_one(code: str, days: int) -> tuple:
         df = None
 
     if df is not None and not (hasattr(df, 'empty') and df.empty) and len(df) >= 40:
-        _save_cache(code, days, df)
+        if days >= 30:  # 只缓存长期数据，不缓存短期fetch
+            _save_cache(code, days, df)
     return code, df
 
 
@@ -619,17 +620,18 @@ def learn_all_normal():
     all_feats, all_lbls = [], []
     trained = 0; skipped = 0; from_api = 0; from_cache = 0
 
-    cache_files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.pkl')]
-    random.shuffle(cache_files)
+    # 只用365d缓存文件确定股票列表，去重
+    codes_set = set()
+    for fname in os.listdir(CACHE_DIR):
+        if fname.endswith('_365d.pkl'):
+            code = fname.split('_')[0]
+            if code.isdigit() and len(code) == 6 and code not in limit_codes:
+                codes_set.add(code)
 
-    # 分批次调API获取最新数据
-    non_limit_list = []
-    for fname in cache_files:
-        code = fname.split('_')[0]
-        if code.isdigit() and len(code) == 6 and code not in limit_codes:
-            non_limit_list.append(code)
+    non_limit_list = list(codes_set)
+    random.shuffle(non_limit_list)
 
-    print(f'  非涨停股: {len(non_limit_list)}只')
+    print(f'  非涨停股: {len(non_limit_list)}只（去重后）')
 
     # 批量调API获取最新数据（只取最近5天，更新最后一天特征）
     batch_size = 100  # 大一点，少量数据请求快
