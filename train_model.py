@@ -594,9 +594,9 @@ def full_train():
 def daily_learn():
     """
     每日增量学习：
-    1. 获取今日涨停股K线（近100天）
-    2. 提特征、训练
-    3. 若已有历史模型，用 init_model 暖启动（延续上次权重）
+    1. 涨停股100天K线（重点样本）
+    2. 随机200只非涨停股从缓存取（负样本+普通样本）
+    3. 混合训练，模型学习涨跌两面
     """
     t0 = time.time()
     print('=' * 65)
@@ -604,39 +604,66 @@ def daily_learn():
     print('=' * 65)
 
     import akshare as ak
+    import random
     today = datetime.now().strftime('%Y%m%d')
 
-    print('\n[1/3] 获取今日涨停股...')
+    # 1. 涨停股
+    print('\n[1/4] 获取今日涨停股...')
+    limit_codes = set()
     try:
         limit_df = ak.stock_zt_pool_em(date=today)
-        if limit_df is None or limit_df.empty:
-            print('  今日无涨停数据，跳过')
-            return
-        codes = limit_df['代码'].astype(str).str.strip().tolist()
-        codes = [c for c in codes if c.isdigit() and len(c) == 6]
-        print(f'  涨停: {len(codes)}只')
-    except Exception as e:
-        print(f'  [ERROR] 获取涨停池失败: {e}')
-        return
+        if limit_df is not None and not limit_df.empty:
+            limit_codes = set(limit_df['代码'].astype(str).str.zfill(6).str.strip().tolist())
+            limit_codes = {c for c in limit_codes if c.isdigit() and len(c) == 6}
+            print(f'  涨停: {len(limit_codes)}只')
+    except:
+        pass
 
-    print(f'\n[2/3] 并发获取100天K线...')
-    klines = fetch_kline_batch_concurrent(codes[:80], 100)
+    # 2. 从缓存随机取非涨停股，学习正常股票的特征
+    print('\n[2/4] 从缓存随机采样非涨停股...')
+    cache_codes = set()
+    for f in os.listdir(CACHE_DIR):
+        if f.endswith('.pkl'):
+            code = f.split('_')[0]
+            if code.isdigit() and len(code) == 6 and code not in limit_codes:
+                cache_codes.add(code)
+
+    sample_size = min(200, len(cache_codes))
+    non_limit_codes = random.sample(list(cache_codes), sample_size) if cache_codes else []
+    print(f'  缓存可用: {len(cache_codes)}只, 随机采样: {len(non_limit_codes)}只')
+
+    # 3. 获取K线：涨停股(新获取) + 缓存股(直接读缓存)
+    all_codes = list(limit_codes)[:80] + non_limit_codes
+    random.shuffle(all_codes)  # 混合涨停和非涨停
+
+    print(f'\n[3/4] 获取K线 (共{len(all_codes)}只)...')
+    # 涨停股需要新获取K线
+    klines = fetch_kline_batch_concurrent(list(limit_codes)[:80], 100)
+    # 非涨停股直接读缓存
+    for code in non_limit_codes:
+        cached = _load_cache(code, TRAINING_DAYS)
+        if cached is not None and len(cached) >= 80:
+            klines[code] = cached.tail(100)  # 只用最近100天
+
     all_feats, all_lbls = [], []
-    trained = 0
+    trained_zt = 0; trained_normal = 0
     for code, df in klines.items():
-        if len(df) >= 80:
+        if df is not None and len(df) >= 80:
             feats, lbls = extract_features(df)
             if feats:
                 all_feats.extend(feats)
                 all_lbls.extend(lbls)
-                trained += 1
-    print(f'  有效: {trained}只  |  特征: {len(all_feats)}条')
+                if code in limit_codes: trained_zt += 1
+                else: trained_normal += 1
+
+    print(f'  涨停股: {trained_zt}只, 普通股: {trained_normal}只, 特征: {len(all_feats)}条')
 
     if len(all_feats) < 200:
         print('  数据不足，跳过今日学习')
         return
 
-    print(f'\n[3/3] 增量训练...')
+    # 4. 训练
+    print(f'\n[4/4] 增量训练...')
     model, acc, importance, val_metrics = train_model_lgbm(all_feats, all_lbls, '每日增量')
 
     tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
