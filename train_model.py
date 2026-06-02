@@ -631,17 +631,35 @@ def learn_all_normal():
 
     print(f'  非涨停股: {len(non_limit_list)}只')
 
-    # 批量调API
-    batch_size = 50
+    # 批量调API获取最新数据（只取最近5天，更新最后一天特征）
+    batch_size = 100  # 大一点，少量数据请求快
     for i in range(0, len(non_limit_list), batch_size):
         batch = non_limit_list[i:i+batch_size]
-        klines = fetch_kline_batch_concurrent(batch, 100)  # API获取最新100天
+        klines = fetch_kline_batch_concurrent(batch, 5)  # 只取最近5天，极快
         for code in batch:
-            df = klines.get(code)
-            if df is not None and len(df) >= 80:
+            new_df = klines.get(code)
+            df = None
+            if new_df is not None and len(new_df) >= 2:
                 from_api += 1
-            else:
-                # API失败，读缓存
+                # 读缓存获取完整历史，加上最新数据
+                cache_path = os.path.join(CACHE_DIR, f'{code}_{TRAINING_DAYS}d.pkl')
+                if os.path.exists(cache_path):
+                    try:
+                        cached = pd.read_pickle(cache_path)
+                        if cached is not None and len(cached) >= 80:
+                            # 用最新API数据替换缓存中的旧数据
+                            latest_api_date = new_df['date'].max() if 'date' in new_df.columns else None
+                            cached_latest = cached['date'].max() if 'date' in cached.columns else None
+                            if latest_api_date is not None and cached_latest is not None and str(latest_api_date) > str(cached_latest):
+                                # 用新数据替换旧缓存中的最后几天
+                                cached = cached[cached['date'] < latest_api_date]
+                                df = pd.concat([cached, new_df], ignore_index=True)
+                            else:
+                                df = cached
+                    except:
+                        pass
+            if df is None or len(df) < 80:
+                # API或合并失败，直接用缓存
                 cache_path = os.path.join(CACHE_DIR, f'{code}_{TRAINING_DAYS}d.pkl')
                 if os.path.exists(cache_path):
                     try:
@@ -664,7 +682,7 @@ def learn_all_normal():
             else:
                 skipped += 1
 
-        if (i + batch_size) % 200 == 0:
+        if (i + batch_size) % 500 == 0:
             print(f'  进度: {min(i+batch_size, len(non_limit_list))}/{len(non_limit_list)}, API:{from_api} 缓存:{from_cache}, 有效:{trained}, 特征:{len(all_feats)}条')
 
     if len(all_feats) < 500:
