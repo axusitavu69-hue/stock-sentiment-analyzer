@@ -642,8 +642,16 @@ def daily_learn():
     # 非涨停股直接读缓存
     for code in non_limit_codes:
         cached = _load_cache(code, TRAINING_DAYS)
-        if cached is not None and len(cached) >= 80:
-            klines[code] = cached.tail(100)  # 只用最近100天
+        if cached is None:
+            # 试试读pkl文件
+            cache_path = os.path.join(CACHE_DIR, f'{code}_{TRAINING_DAYS}d.pkl')
+            if os.path.exists(cache_path):
+                try:
+                    cached = pd.read_pickle(cache_path)
+                except:
+                    pass
+        if cached is not None and not (hasattr(cached, 'empty') and cached.empty) and len(cached) >= 80:
+            klines[code] = cached.tail(100)
 
     all_feats, all_lbls = [], []
     trained_zt = 0; trained_normal = 0
@@ -670,7 +678,7 @@ def daily_learn():
     prev_samples = tracker.get('ml_model', {}).get('samples', 0)
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
     save_model_and_tracker(model, acc, importance,
-                           prev_samples + len(all_feats), trained, rounds, val_metrics)
+                           prev_samples + len(all_feats), trained_zt + trained_normal, rounds, val_metrics)
 
     print(f'\n  [OK] 今日学习完成! 累计样本: {prev_samples + len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
 
