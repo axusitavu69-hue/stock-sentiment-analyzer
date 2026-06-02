@@ -967,28 +967,37 @@ def predict_one(code):
 
     # ----- 阶段2: 证据收集与加权 -----
     evidence_bull = []; evidence_bear = []
-    for i in range(min(6, len(feature_names))):
+    # 检查所有特征（不限前6个），降低阈值
+    n_features = min(len(feature_names), len(z_scores), len(importance))
+    for i in range(n_features):
         z = z_scores[i]; imp = importance[i] if i < len(importance) else 0.05
-        if z > 0.8 and imp > 0.03:
+        if z > 0.25:
             evidence_bull.append((feature_names[i], z, imp))
-        elif z < -0.8 and imp > 0.03:
-            evidence_bear.append((feature_names[i], z, imp))
+        elif z < -0.25:
+            evidence_bear.append((feature_names[i], abs(z), imp))
     evidence_bull.sort(key=lambda x: -x[1]*x[2])
     evidence_bear.sort(key=lambda x: -x[1]*x[2])
 
     w_bull = sum(z * imp for _, z, imp in evidence_bull)
-    w_bear = sum(abs(z) * imp for _, z, imp in evidence_bear)
+    w_bear = sum(z * imp for _, z, imp in evidence_bear)
 
-    print(f'\n  [阶段2] 加权证据: 看多{w_bull:.3f} vs 看空{w_bear:.3f}')
-    for name, z, imp in evidence_bull[:4]:
-        print(f'    🟢 {name:10s} Z={z:+.2f} x w={imp:.2f} = {z*imp:+.3f}')
-    for name, z, imp in evidence_bear[:4]:
-        print(f'    🔴 {name:10s} Z={z:+.2f} x w={imp:.2f} = {abs(z)*imp:+.3f}')
+    # 确保即使信号微弱也有一个最小基准
+    w_bull = max(w_bull, 0.02)
+    w_bear = max(w_bear, 0.02)
+
+    print(f'\n  [阶段2] 证据汇总: 看多{w_bull:.3f} vs 看空{w_bear:.3f}')
+    # Show all signals, not just top 4
+    all_sorted = [(n, z, imp, 'bull') for n,z,imp in evidence_bull] + [(n, z, imp, 'bear') for n,z,imp in evidence_bear]
+    all_sorted.sort(key=lambda x: -x[1]*x[2])
+    for name, z, imp, typ in all_sorted[:8]:
+        icon = '🟢' if typ == 'bull' else '🔴'
+        print(f'    {icon} {name:10s} Z={z:+.2f} x {imp:.2f} = {z*imp:+.3f}')
 
     # ----- 阶段3: 贝叶斯概率更新 -----
     prior = 0.50
     evidence_ratio = w_bull / (w_bear + 1e-9)
-    posterior = prior + (evidence_ratio - 1) * 0.18 if evidence_ratio > 1 else prior - (1 - evidence_ratio) * 0.18
+    # 更敏感的贝叶斯：乘数从0.18提高到0.30
+    posterior = prior + (evidence_ratio - 1) * 0.30 if evidence_ratio > 1 else prior - (1 - evidence_ratio) * 0.30
     posterior = max(0.10, min(0.90, posterior))
 
     print(f'\n  [阶段3] 贝叶斯更新:')
@@ -1011,10 +1020,11 @@ def predict_one(code):
 
     # ----- 阶段5: 置信度校准 -----
     consistency = abs(w_bull - w_bear) / (w_bull + w_bear + 1e-9)
-    stability = 1.0 / (1.0 + vola_recent)
-    model_cap = min(0.70, max(0.50, ml.get('accuracy', 0.55)))
-    calibrated = posterior * stability * (0.5 + 0.5 * consistency)
-    calibrated = min(model_cap + 0.08, max(0.15, calibrated))
+    stability = 1.0 / (1.0 + vola_recent * 0.5)  # 减半波动率惩罚
+    model_cap = min(0.75, max(0.50, ml.get('accuracy', 0.55)))
+    # 校准时保留更多原始信号
+    calibrated = posterior * (0.5 + 0.5 * stability) * (0.3 + 0.7 * consistency)
+    calibrated = min(model_cap + 0.10, max(0.20, calibrated))
 
     print(f'\n  [阶段5] 置信度校准:')
     print(f'    原始后验: {posterior:.0%}')
@@ -1091,18 +1101,18 @@ def predict_one(code):
     posterior_display = posterior if posterior >= 0.5 else (1 - posterior)
     net = evidence_ratio
 
-    if calibrated >= 0.55:
+    if calibrated >= 0.50:
         level = '强'
-        advice = '模型高度自信。这是可以正常仓位参与的setup。'
-    elif calibrated >= 0.42:
+        advice = '信号较明确，可正常仓位参与，设好止损。'
+    elif calibrated >= 0.40:
         level = '中'
-        advice = '方向倾向明确但存在噪音。建议半仓或设置较紧止损。'
+        advice = '方向倾向明确，建议中等仓位或设较紧止损。'
     elif calibrated >= 0.30:
         level = '弱'
-        advice = '信号偏弱，但如果其他分析也指向同一方向可轻仓试探。'
+        advice = '信号偏弱但方向可参考。轻仓试探，错了及时止损。'
     else:
         level = '微'
-        advice = '证据不充分，仅作参考方向。追高或重仓不建议。'
+        advice = '方向仅作微弱参考，不宜据此重仓决策。'
 
     print(f'    方向: {direction} ({posterior_display:.0%}倾向)')
     print(f'    信号强度: {level} (校准置信度 {calibrated:.0%})')
