@@ -692,21 +692,39 @@ def learn_all_normal():
 
         if (i + batch_size) % 500 == 0:
             print(f'  进度: {min(i+batch_size, len(non_limit_list))}/{len(non_limit_list)}, API:{from_api} 缓存:{from_cache}, 有效:{trained}, 特征:{len(all_feats)}条')
+    # 去重：已训练过的股票-日期组合跳过
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
+    trained_pairs = set()
+    for entry in tracker.get('trained_stocks', []):
+        trained_pairs.add((entry['code'], entry.get('last_date', '')))
 
-    if len(all_feats) < 500:
-        print('  数据不足')
+    dedup_feats = []; dedup_lbls = []; dedup_trained = 0; dup_skipped = 0
+    for code in list(klines.keys()):
+        df = klines[code]
+        if df is None or len(df) < 80: continue
+        last_date = str(df['date'].max()) if 'date' in df.columns else ''
+        if (code, last_date) in trained_pairs:
+            dup_skipped += 1; continue
+        feats, lbls = extract_features(df)
+        if feats:
+            dedup_feats.extend(feats); dedup_lbls.extend(lbls); dedup_trained += 1
+            tracker.setdefault('trained_stocks', []).append({'code': code, 'last_date': last_date})
+    if len(tracker.get('trained_stocks', [])) > 15000:
+        tracker['trained_stocks'] = tracker['trained_stocks'][-15000:]
+
+    print(f'  去重后: {dedup_trained}只新增, 跳过{dup_skipped}只已训练')
+
+    if len(dedup_feats) < 500:
+        print('  新增数据不足，跳过训练')
+        with open(QUANT_TRACKER, 'w', encoding='utf-8') as f:
+            json.dump(tracker, f, ensure_ascii=False, indent=2)
         return
 
-    # 训练
     print(f'\n[3/3] 训练LightGBM...')
-    model, acc, importance, val_metrics = train_model_lgbm(all_feats, all_lbls, '全量普通股')
-    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
-    prev_samples = tracker.get('ml_model', {}).get('samples', 0)
+    model, acc, importance, val_metrics = train_model_lgbm(dedup_feats, dedup_lbls, '全量普通股')
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
-    # 样本数不累加，记录本轮实际值
-    save_model_and_tracker(model, acc, importance,
-                           len(all_feats), trained, rounds, val_metrics)
-    print(f'\n  [OK] 学习完成! 本轮: {len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
+    save_model_and_tracker(model, acc, importance, len(dedup_feats), dedup_trained, rounds, val_metrics)
+    print(f'\n  [OK] 学习完成! 新增: {len(dedup_feats)}条, 跳过重复: {dup_skipped}只 | 耗时{time.time()-t0:.0f}s')
 
 def daily_learn():
     """
