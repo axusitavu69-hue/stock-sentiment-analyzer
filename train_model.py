@@ -614,43 +614,58 @@ def learn_all_normal():
     except:
         pass
 
-    # 从缓存取所有非涨停股
-    print(f'\n[2/3] 从缓存加载非涨停股K线...')
+    # 从缓存取所有非涨停股，优先调API获取最新K线
+    print(f'\n[2/3] 获取非涨停股K线（API优先，缓存兜底）...')
     all_feats, all_lbls = [], []
-    trained = 0; skipped = 0
+    trained = 0; skipped = 0; from_api = 0; from_cache = 0
 
     cache_files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.pkl')]
-    random.shuffle(cache_files)  # 随机顺序
+    random.shuffle(cache_files)
 
-    for i, fname in enumerate(cache_files):
+    # 分批次调API获取最新数据
+    non_limit_list = []
+    for fname in cache_files:
         code = fname.split('_')[0]
-        if not code.isdigit() or len(code) != 6:
-            continue
-        if code in limit_codes:
-            continue
+        if code.isdigit() and len(code) == 6 and code not in limit_codes:
+            non_limit_list.append(code)
 
-        # 读缓存
-        cache_path = os.path.join(CACHE_DIR, fname)
-        try:
-            df = pd.read_pickle(cache_path)
-        except:
-            skipped += 1; continue
+    print(f'  非涨停股: {len(non_limit_list)}只')
 
-        if df is None or len(df) < 80:
-            skipped += 1; continue
+    # 批量调API
+    batch_size = 50
+    for i in range(0, len(non_limit_list), batch_size):
+        batch = non_limit_list[i:i+batch_size]
+        klines = fetch_kline_batch_concurrent(batch, 100)  # API获取最新100天
+        for code in batch:
+            df = klines.get(code)
+            if df is not None and len(df) >= 80:
+                from_api += 1
+            else:
+                # API失败，读缓存
+                cache_path = os.path.join(CACHE_DIR, f'{code}_{TRAINING_DAYS}d.pkl')
+                if os.path.exists(cache_path):
+                    try:
+                        df = pd.read_pickle(cache_path)
+                        if df is not None and len(df) >= 80:
+                            from_cache += 1
+                        else:
+                            df = None
+                    except:
+                        df = None
 
-        feats, lbls = extract_features(df)
-        if feats:
-            all_feats.extend(feats)
-            all_lbls.extend(lbls)
-            trained += 1
-        else:
-            skipped += 1
+            if df is not None and len(df) >= 80:
+                feats, lbls = extract_features(df)
+                if feats:
+                    all_feats.extend(feats)
+                    all_lbls.extend(lbls)
+                    trained += 1
+                else:
+                    skipped += 1
+            else:
+                skipped += 1
 
-        if (i + 1) % 500 == 0:
-            print(f'  进度: {i+1}/{len(cache_files)}, {trained}只有效, {skipped}只跳过, {len(all_feats)}条特征')
-
-    print(f'  完成: {trained}只, {len(all_feats)}条特征, {skipped}只跳过')
+        if (i + batch_size) % 200 == 0:
+            print(f'  进度: {min(i+batch_size, len(non_limit_list))}/{len(non_limit_list)}, API:{from_api} 缓存:{from_cache}, 有效:{trained}, 特征:{len(all_feats)}条')
 
     if len(all_feats) < 500:
         print('  数据不足')
