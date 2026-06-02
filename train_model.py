@@ -650,12 +650,10 @@ def learn_all_normal():
                             # 用最新API数据替换缓存中的旧数据
                             latest_api_date = new_df['date'].max() if 'date' in new_df.columns else None
                             cached_latest = cached['date'].max() if 'date' in cached.columns else None
-                            if latest_api_date is not None and cached_latest is not None and str(latest_api_date) > str(cached_latest):
-                                # 用新数据替换旧缓存中的最后几天
-                                cached = cached[cached['date'] < latest_api_date]
-                                df = pd.concat([cached, new_df], ignore_index=True)
-                            else:
-                                df = cached
+                            # 合并缓存和新API数据，按日期去重，保留最新的
+                            df = pd.concat([cached, new_df], ignore_index=True)
+                            df = df.drop_duplicates(subset=['date'], keep='last') if 'date' in df.columns else df
+                            df = df.sort_values('date').reset_index(drop=True)
                     except:
                         pass
             if df is None or len(df) < 80:
