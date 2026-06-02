@@ -1083,26 +1083,39 @@ def predict_one(code):
     with open(QUANT_TRACKER, 'w', encoding='utf-8') as f:
         json.dump(tracker, f, ensure_ascii=False, indent=2)
 
-    # ----- 最终 -----
+    # ----- 最终判决 -----
     print(f'\n  {"="*60}')
-    if consistency < 0.12:
-        direction = '无法判断'
-        verdict = '多空证据接近均等，模型选择不预测。"不交易"本身就是一个有效决策。'
-    elif calibrated >= 0.60:
-        direction = '看多' if posterior >= 0.5 else '看空'
-        verdict = f'{direction} | 高度确信 | 证据充分且一致，模型最有把握的预测类型'
-    elif calibrated >= 0.45:
-        direction = '看多' if posterior >= 0.5 else '看空'
-        verdict = f'{direction} | 中等确信 | 方向明确，适合正常仓位'
-    elif calibrated >= 0.35:
-        direction = '看多' if posterior >= 0.5 else '看空'
-        verdict = f'{direction} | 低确信 | 信号不足，轻仓或观望'
-    else:
-        direction = '无法判断'
-        verdict = '证据强度和一致性均不足。模型拒绝给出方向。'
+    print(f'  [最终判决]')
+    posterior_pct = posterior * 100
+    direction = '看多' if posterior >= 0.5 else '看空'
+    posterior_display = posterior if posterior >= 0.5 else (1 - posterior)
+    net = evidence_ratio
 
-    print(f'  [最终判决] {verdict}')
-    print(f'  后验概率: {posterior:.0%} | 校准置信度: {calibrated:.0%}')
+    if calibrated >= 0.55:
+        level = '强'
+        advice = '模型高度自信。这是可以正常仓位参与的setup。'
+    elif calibrated >= 0.42:
+        level = '中'
+        advice = '方向倾向明确但存在噪音。建议半仓或设置较紧止损。'
+    elif calibrated >= 0.30:
+        level = '弱'
+        advice = '信号偏弱，但如果其他分析也指向同一方向可轻仓试探。'
+    else:
+        level = '微'
+        advice = '证据不充分，仅作参考方向。追高或重仓不建议。'
+
+    print(f'    方向: {direction} ({posterior_display:.0%}倾向)')
+    print(f'    信号强度: {level} (校准置信度 {calibrated:.0%})')
+    print(f'    证据比: {net:.2f} (看多{w_bull:.2f}/看空{w_bear:.2f})')
+    print(f'    {advice}')
+
+    # Signal summary
+    bull_items = [f'{n}({z:+.1f})' for n,z,_ in evidence_bull[:3]]
+    bear_items = [f'{n}({z:+.1f})' for n,z,_ in evidence_bear[:3]]
+    if bull_items or bear_items:
+        print(f'    看多信号: {", ".join(bull_items) if bull_items else "无"}')
+        print(f'    看空信号: {", ".join(bear_items) if bear_items else "无"}')
+
     print(f'{"="*60}\n')
 
 
