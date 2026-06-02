@@ -703,9 +703,10 @@ def learn_all_normal():
     tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
     prev_samples = tracker.get('ml_model', {}).get('samples', 0)
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
+    # 样本数不累加，记录本轮实际值
     save_model_and_tracker(model, acc, importance,
-                           prev_samples + len(all_feats), trained, rounds, val_metrics)
-    print(f'\n  [OK] 学习完成! 累计: {prev_samples + len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
+                           len(all_feats), trained, rounds, val_metrics)
+    print(f'\n  [OK] 学习完成! 本轮: {len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
 
 def daily_learn():
     """
@@ -794,9 +795,9 @@ def daily_learn():
     prev_samples = tracker.get('ml_model', {}).get('samples', 0)
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
     save_model_and_tracker(model, acc, importance,
-                           prev_samples + len(all_feats), trained_zt + trained_normal, rounds, val_metrics)
+                           len(all_feats), trained_zt + trained_normal, rounds, val_metrics)
 
-    print(f'\n  [OK] 今日学习完成! 累计样本: {prev_samples + len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
+    print(f'\n  [OK] 今日学习完成! 累计样本: {len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
 
 
 def auto_evolve_factors():
