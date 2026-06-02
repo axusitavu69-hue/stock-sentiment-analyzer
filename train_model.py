@@ -591,6 +591,81 @@ def full_train():
     print(f'{"=" * 65}')
 
 
+def learn_all_normal():
+    """学习全部非涨停普通股（从缓存读取，不调API）"""
+    t0 = time.time()
+    print('=' * 65)
+    print(f'  全量普通股学习 ({datetime.now().strftime("%Y-%m-%d")})')
+    print('=' * 65)
+
+    import akshare as ak
+    import random
+    today = datetime.now().strftime('%Y%m%d')
+
+    # 涨停股列表（排除）
+    print('\n[1/3] 获取今日涨停股列表...')
+    limit_codes = set()
+    try:
+        limit_df = ak.stock_zt_pool_em(date=today)
+        if limit_df is not None and not limit_df.empty:
+            limit_codes = set(limit_df['代码'].astype(str).str.zfill(6).str.strip().tolist())
+            limit_codes = {c for c in limit_codes if c.isdigit() and len(c) == 6}
+        print(f'  涨停: {len(limit_codes)}只 -> 排除')
+    except:
+        pass
+
+    # 从缓存取所有非涨停股
+    print(f'\n[2/3] 从缓存加载非涨停股K线...')
+    all_feats, all_lbls = [], []
+    trained = 0; skipped = 0
+
+    cache_files = [f for f in os.listdir(CACHE_DIR) if f.endswith('.pkl')]
+    random.shuffle(cache_files)  # 随机顺序
+
+    for i, fname in enumerate(cache_files):
+        code = fname.split('_')[0]
+        if not code.isdigit() or len(code) != 6:
+            continue
+        if code in limit_codes:
+            continue
+
+        # 读缓存
+        cache_path = os.path.join(CACHE_DIR, fname)
+        try:
+            df = pd.read_pickle(cache_path)
+        except:
+            skipped += 1; continue
+
+        if df is None or len(df) < 80:
+            skipped += 1; continue
+
+        feats, lbls = extract_features(df)
+        if feats:
+            all_feats.extend(feats)
+            all_lbls.extend(lbls)
+            trained += 1
+        else:
+            skipped += 1
+
+        if (i + 1) % 500 == 0:
+            print(f'  进度: {i+1}/{len(cache_files)}, {trained}只有效, {skipped}只跳过, {len(all_feats)}条特征')
+
+    print(f'  完成: {trained}只, {len(all_feats)}条特征, {skipped}只跳过')
+
+    if len(all_feats) < 500:
+        print('  数据不足')
+        return
+
+    # 训练
+    print(f'\n[3/3] 训练LightGBM...')
+    model, acc, importance, val_metrics = train_model_lgbm(all_feats, all_lbls, '全量普通股')
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
+    prev_samples = tracker.get('ml_model', {}).get('samples', 0)
+    rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
+    save_model_and_tracker(model, acc, importance,
+                           prev_samples + len(all_feats), trained, rounds, val_metrics)
+    print(f'\n  [OK] 学习完成! 累计: {prev_samples + len(all_feats)}条 | 耗时{time.time()-t0:.0f}s')
+
 def daily_learn():
     """
     每日增量学习：
@@ -770,6 +845,7 @@ def main():
     parser.add_argument('--predict', action='store_true', help='用已训练模型预测今日涨停股')
     parser.add_argument('--predict-code', type=str, help='预测指定股票代码')
     parser.add_argument('--feedback', type=str, help='反馈预测结果, 格式: 代码:对/错, 例如 000001:1 或 000001:0')
+    parser.add_argument('--learn-all', action='store_true', help='学习全部非涨停普通股')
     args = parser.parse_args()
 
     if args.status:
@@ -795,6 +871,10 @@ def main():
     if args.daily:
         daily_learn()
         auto_evolve_factors()
+        return
+
+    if args.learn_all:
+        learn_all_normal()
         return
 
     if args.retrain:
