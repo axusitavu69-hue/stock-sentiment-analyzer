@@ -391,12 +391,23 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
     pos_ratio = y_train.mean()
     scale = (1 - pos_ratio) / (pos_ratio + 1e-9)
 
+    # 根据数据量动态调整参数，避免小数据时OOM
+    n_samples = len(X_train)
+    if n_samples < 5000:
+        n_est, n_leaves, lr = 100, 15, 0.05
+    elif n_samples < 50000:
+        n_est, n_leaves, lr = 300, 31, 0.02
+    elif n_samples < 200000:
+        n_est, n_leaves, lr = 500, 47, 0.01
+    else:
+        n_est, n_leaves, lr = 800, 63, 0.008
+
     model = LGBMClassifier(
-        n_estimators      = 800,
-        learning_rate     = 0.008,
-        num_leaves        = 63,
+        n_estimators      = n_est,
+        learning_rate     = lr,
+        num_leaves        = n_leaves,
         max_depth         = 7,
-        min_child_samples = 30,
+        min_child_samples = max(5, min(30, n_samples // 500)),
         subsample         = 0.8,
         subsample_freq    = 1,
         colsample_bytree  = 0.8,
@@ -404,7 +415,7 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
         reg_lambda        = 0.1,
         scale_pos_weight  = scale,
         random_state      = 42,
-        n_jobs            = -1,        # 使用全部CPU核
+        n_jobs            = -1,
         verbose           = -1,
     )
 
