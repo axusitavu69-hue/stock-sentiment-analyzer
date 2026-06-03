@@ -961,8 +961,8 @@ def predict_today():
 
     results.sort(key=lambda x: -x['评分'])
     for i, r in enumerate(results):
-        emoji = '🟢' if r['评分'] >= 75 else ('🔵' if r['评分'] >= 60 else ('🟡' if r['评分'] >= 45 else '🔴'))
-        print(f'{i+1:3d}. {emoji} {r["代码"]} {r["名称"]:8s} {r["连板"]}连板  {r["评分"]:5.1f}分  {r["预测"]}')
+        tag = '[++]' if r['评分'] >= 75 else ('[+]' if r['评分'] >= 60 else ('[~]' if r['评分'] >= 45 else '[-]'))
+        print(f'{i+1:3d}. {tag} {r["代码"]} {r["名称"]:8s} {r["连板"]}连板  {r["评分"]:5.1f}分  {r["预测"]}')
 
     print(f'\n合计: {len(results)}只涨停, 高概率连板{sum(1 for r in results if r["评分"]>=75)}只')
 
@@ -1042,7 +1042,7 @@ def predict_one(code):
     for i, name in enumerate(feature_names[:8]):
         z = z_scores[i]
         bar = '↑' if z > 0.5 else ('↓' if z < -0.5 else '→')
-        color = '🟢' if z > 1 else ('🟡' if abs(z) < 0.5 else '🔴')
+        color = '[+]' if z > 1 else ('[~]' if abs(z) < 0.5 else '[-]')
         print(f'    {color} {name:10s} {bar} (Z={z:+.2f}, 权重{importance[i]:.1%})')
 
     # 近期趋势
@@ -1118,7 +1118,7 @@ def predict_one(code):
     all_sorted = [(n, z, imp, 'bull') for n,z,imp in evidence_bull] + [(n, z, imp, 'bear') for n,z,imp in evidence_bear]
     all_sorted.sort(key=lambda x: -x[1]*x[2])
     for name, z, imp, typ in all_sorted[:8]:
-        icon = '🟢' if typ == 'bull' else '🔴'
+        icon = '[bull]' if typ == 'bull' else '[bear]'
         print(f'    {icon} {name:10s} Z={z:+.2f} x {imp:.2f} = {z*imp:+.3f}')
 
     # ----- 阶段3: 贝叶斯概率更新 -----
