@@ -452,13 +452,21 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
 
 
 def save_model_and_tracker(model, acc, importance, samples, stocks,
-                           train_rounds, val_metrics):
-    """持久化：模型存pkl，指标存JSON"""
-    # 1. 保存模型到pkl（可直接 predict）
+                           train_rounds, val_metrics, feats=None, lbls=None):
+    """持久化：模型存pkl，指标存JSON，特征样本存pkl"""
     if model is not None:
         with open(MODEL_PKL, 'wb') as f:
             pickle.dump(model, f)
         print(f"  模型pkl: {MODEL_PKL}")
+
+    # 保存特征样本供增量训练续用（随机10%）
+    if feats is not None and len(feats) > 1000:
+        import random
+        n_sample = min(50000, len(feats) // 10)
+        idx = random.sample(range(len(feats)), n_sample)
+        sample = {'X': np.array(feats)[idx], 'y': np.array(lbls)[idx]}
+        with open(f'{MODEL_DIR}/feature_sample.pkl', 'wb') as f:
+            pickle.dump(sample, f)
 
     # 2. 更新tracker JSON
     tracker = {}
@@ -609,7 +617,7 @@ def full_train():
     if os.path.exists(QUANT_TRACKER):
         tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8'))
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
-    save_model_and_tracker(model, acc, importance, len(all_feats), trained, rounds, val_metrics)
+    save_model_and_tracker(model, acc, importance, len(all_feats), trained, rounds, val_metrics, feats=all_feats, lbls=all_lbls)
 
     elapsed = time.time() - t0
     print(f'\n{"=" * 65}')
@@ -736,11 +744,27 @@ def learn_all_normal():
             json.dump(tracker, f, ensure_ascii=False, indent=2)
         return
 
+    # 加载历史特征样本，与新数据合并训练
+    prev_feats, prev_lbls = [], []
+    sample_path = f'{MODEL_DIR}/feature_sample.pkl'
+    if os.path.exists(sample_path):
+        try:
+            sample = pickle.load(open(sample_path, 'rb'))
+            prev_feats = sample['X'].tolist()
+            prev_lbls = sample['y'].tolist()
+            print(f'  加载历史样本: {len(prev_feats)}条')
+        except: pass
+
+    combined_feats = prev_feats + dedup_feats
+    combined_lbls = prev_lbls + dedup_lbls
+    print(f'  合并训练: {len(prev_feats)}历史 + {len(dedup_feats)}新增 = {len(combined_feats)}条')
+
     print(f'\n  训练LightGBM...')
-    model, acc, importance, val_metrics = train_model_lgbm(dedup_feats, dedup_lbls, '全A股学习')
+    model, acc, importance, val_metrics = train_model_lgbm(combined_feats, combined_lbls, '全A股学习')
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
-    save_model_and_tracker(model, acc, importance, len(dedup_feats), dedup_trained, rounds, val_metrics)
-    print(f'\n  [OK] 学习完成! 新增: {len(dedup_feats)}条, 跳过重复: {dup_skipped}只 | 耗时{time.time()-t0:.0f}s')
+    save_model_and_tracker(model, acc, importance, len(combined_feats), dedup_trained, rounds, val_metrics,
+                           feats=combined_feats, lbls=combined_lbls)
+    print(f'\n  [OK] 学习完成! 新增: {len(dedup_feats)}条, 合并: {len(combined_feats)}条 | 耗时{time.time()-t0:.0f}s')
 
 def daily_learn():
     """每日增量学习 = 全A股最新数据学习（等同于 --learn-all）"""
