@@ -611,27 +611,17 @@ def learn_all_normal():
     """学习全部非涨停普通股（从缓存读取，不调API）"""
     t0 = time.time()
     print('=' * 65)
-    print(f'  全量普通股学习 ({datetime.now().strftime("%Y-%m-%d")})')
+    print(f'  全A股最新数据学习 ({datetime.now().strftime("%Y-%m-%d")})')
     print('=' * 65)
 
     import akshare as ak
     import random
     today = datetime.now().strftime('%Y%m%d')
 
-    # 涨停股列表（排除）
-    print('\n[1/3] 获取今日涨停股列表...')
-    limit_codes = set()
-    try:
-        limit_df = ak.stock_zt_pool_em(date=today)
-        if limit_df is not None and not limit_df.empty:
-            limit_codes = set(limit_df['代码'].astype(str).str.zfill(6).str.strip().tolist())
-            limit_codes = {c for c in limit_codes if c.isdigit() and len(c) == 6}
-        print(f'  涨停: {len(limit_codes)}只 -> 排除')
-    except:
-        pass
-
-    # 从缓存取所有非涨停股，优先调API获取最新K线
-    print(f'\n[2/3] 获取非涨停股K线（API优先，缓存兜底）...')
+    # 全部A股最新数据学习
+    print('\n[1/2] 加载全A股缓存列表...')
+    all_feats, all_lbls = [], []
+    print(f'\n[2/2] 获取全A股最新K线（API优先，缓存兜底）...')
     all_feats, all_lbls = [], []
     trained = 0; skipped = 0; from_api = 0; from_cache = 0
 
@@ -648,13 +638,13 @@ def learn_all_normal():
     for fname in os.listdir(CACHE_DIR):
         if fname.endswith('_365d.pkl'):
             code = fname.split('_')[0]
-            if code.isdigit() and len(code) == 6 and code not in limit_codes:
+            if code.isdigit() and len(code) == 6:
                 codes_set.add(code)
 
     non_limit_list = list(codes_set)
     random.shuffle(non_limit_list)
 
-    print(f'  非涨停股: {len(non_limit_list)}只')
+    print(f'  全A股: {len(non_limit_list)}只（涨停+非涨停）')
 
     # 批量调API获取最新数据（只取最近5天，更新最后一天特征）
     batch_size = 100  # 大一点，少量数据请求快
@@ -735,8 +725,8 @@ def learn_all_normal():
             json.dump(tracker, f, ensure_ascii=False, indent=2)
         return
 
-    print(f'\n[3/3] 训练LightGBM...')
-    model, acc, importance, val_metrics = train_model_lgbm(dedup_feats, dedup_lbls, '全量普通股')
+    print(f'\n  训练LightGBM...')
+    model, acc, importance, val_metrics = train_model_lgbm(dedup_feats, dedup_lbls, '全A股学习')
     rounds = tracker.get('ml_model', {}).get('train_rounds', 0) + 1
     save_model_and_tracker(model, acc, importance, len(dedup_feats), dedup_trained, rounds, val_metrics)
     print(f'\n  [OK] 学习完成! 新增: {len(dedup_feats)}条, 跳过重复: {dup_skipped}只 | 耗时{time.time()-t0:.0f}s')
@@ -775,7 +765,7 @@ def daily_learn():
     for f in os.listdir(CACHE_DIR):
         if f.endswith('.pkl'):
             code = f.split('_')[0]
-            if code.isdigit() and len(code) == 6 and code not in limit_codes:
+            if code.isdigit() and len(code) == 6:
                 cache_codes.add(code)
 
     sample_size = min(200, len(cache_codes))
