@@ -539,10 +539,15 @@ def full_train():
     print('\n[1/4] 构建训练股票池...')
     all_codes = get_stock_pool()
 
-    # ── Step 2: 并发获取K线 ────────────────────────────────
+    # ── Step 2: 并发获取K线 + 去重 ──────────────────────────
     print(f'\n[2/4] 并发获取{TRAINING_DAYS}天K线（{MAX_WORKERS}线程）...')
+    tracker = json.load(open(QUANT_TRACKER, 'r', encoding='utf-8')) if os.path.exists(QUANT_TRACKER) else {}
+    trained_pairs = set()
+    for entry in tracker.get('trained_stocks', []):
+        trained_pairs.add((entry['code'], entry.get('last_date', '')))
+
     all_feats, all_lbls = [], []
-    trained = failed = 0
+    trained = failed = dup_skipped = 0
 
     for batch_start in range(0, len(all_codes), BATCH_SIZE):
         batch = all_codes[batch_start:batch_start + BATCH_SIZE]
@@ -554,30 +559,40 @@ def full_train():
         for code in batch:
             df = klines.get(code)
             if df is not None and len(df) >= 80:
+                last_date = str(df['date'].max()) if 'date' in df.columns else ''
+                if (code, last_date) in trained_pairs:
+                    dup_skipped += 1; continue
                 feats, lbls = extract_features(df)
                 if feats:
                     all_feats.extend(feats)
                     all_lbls.extend(lbls)
                     trained += 1
+                    tracker.setdefault('trained_stocks', []).append({'code': code, 'last_date': last_date})
                 else:
                     failed += 1
             else:
                 failed += 1
 
+        if len(tracker.get('trained_stocks', [])) > 20000:
+            tracker['trained_stocks'] = tracker['trained_stocks'][-20000:]
         elapsed = time.time() - t0
-        print(f'    累计: {trained}只成功 | {failed}只失败 | {len(all_feats)}条特征 | 耗时{elapsed:.0f}s')
+        print(f'    累计: {trained}只成功 | 跳过{dup_skipped}只重复 | {failed}只失败 | {len(all_feats)}条 | 耗时{elapsed:.0f}s')
 
-    print(f'\n  获取完成: {trained}只成功, {failed}只失败, {len(all_feats)}条特征')
+    print(f'\n  获取完成: {trained}只成功, 跳过{dup_skipped}只重复, {failed}只失败, {len(all_feats)}条特征')
 
     if len(all_feats) < 1000:
         print('[ERROR] 训练数据严重不足，请检查网络连接后重试')
         return
 
-    # ── Step 3: 训练 ──────────────────────────────────────
+    # ── Step 3: 保存trained_stocks到磁盘 ─────────────────
+    with open(QUANT_TRACKER, 'w', encoding='utf-8') as f:
+        json.dump(tracker, f, ensure_ascii=False, indent=2)
+
+    # ── Step 4: 训练 ──────────────────────────────────────
     print(f'\n[3/4] 训练LightGBM（{len(all_feats)}条样本）...')
     model, acc, importance, val_metrics = train_model_lgbm(all_feats, all_lbls, '完整训练')
 
-    # ── Step 4: 保存 ──────────────────────────────────────
+    # ── Step 5: 保存模型 ──────────────────────────────────
     print(f'\n[4/4] 保存模型...')
     tracker = {}
     if os.path.exists(QUANT_TRACKER):
