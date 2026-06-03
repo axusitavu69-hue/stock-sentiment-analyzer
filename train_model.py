@@ -1027,7 +1027,7 @@ def predict_today():
         results.append({'代码': code, '名称': name, '连板': lb, '评分': total, '预测': outlook})
 
     results.sort(key=lambda x: -x['评分'])
-    for i, r in enumerate(results[:30]):
+    for i, r in enumerate(results):
         emoji = '🟢' if r['评分'] >= 75 else ('🔵' if r['评分'] >= 60 else ('🟡' if r['评分'] >= 45 else '🔴'))
         print(f'{i+1:3d}. {emoji} {r["代码"]} {r["名称"]:8s} {r["连板"]}连板  {r["评分"]:5.1f}分  {r["预测"]}')
 
