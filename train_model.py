@@ -373,7 +373,8 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
     3. class_weight 应对涨跌不均衡
     4. 返回 (model, acc, importance, val_metrics)
     """
-    import gc; gc.collect()  # 清理LightGBM旧内存池
+    import gc, subprocess, tempfile
+    gc.collect()
     from lightgbm import LGBMClassifier, early_stopping, log_evaluation
 
     if len(features) < 500:
@@ -420,6 +421,16 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
         verbose           = -1,
     )
 
+    # Save data to temp file for subprocess training if in-process fails
+    tmpdir = tempfile.mkdtemp()
+    train_path = os.path.join(tmpdir, 'train_data.pkl')
+    model_path = os.path.join(tmpdir, 'model.pkl')
+    params = {
+        'X_train': X_train, 'X_val': X_val, 'y_train': y_train, 'y_val': y_val,
+        'n_est': n_est, 'n_leaves': n_leaves, 'lr': lr, 'scale': scale
+    }
+    with open(train_path, 'wb') as f: pickle.dump(params, f)
+
     try:
         model.fit(
             X_train, y_train,
@@ -430,14 +441,51 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
             ]
         )
     except Exception as e:
-        if 'partition' in str(e).lower() or 'ConfigurablePool' in str(e):
-            import gc; gc.collect()
-            # Retry with minimal params
-            model = LGBMClassifier(n_estimators=100, num_leaves=15, max_depth=5,
-                                   random_state=42, verbose=-1, n_jobs=1)
-            model.fit(X_train, y_train)
+        err_str = str(e)
+        if 'partition' in err_str.lower() or 'ConfigurablePool' in err_str.lower() or 'FATAL' in err_str:
+            print(f'  内存池冲突，切换子进程训练...')
+            script = f'''
+import pickle, numpy as np, os, sys
+sys.path.insert(0, r'{os.path.dirname(os.path.abspath(__file__))}')
+with open(r'{train_path}', 'rb') as f:
+    p = pickle.load(f)
+from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+m = LGBMClassifier(n_estimators=p['n_est'], learning_rate=p['lr'], num_leaves=p['n_leaves'],
+                   max_depth=7, random_state=42, verbose=-1, n_jobs=1,
+                   scale_pos_weight=p['scale'], min_child_samples=20,
+                   subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=0.1)
+m.fit(p['X_train'], p['y_train'],
+      eval_set=[(p['X_val'], p['y_val'])],
+      callbacks=[early_stopping(stopping_rounds=50, verbose=False), log_evaluation(period=-1)])
+acc = float(m.score(p['X_val'], p['y_val']))
+imp = m.feature_importances_
+preds = m.predict(p['X_val'])
+from sklearn.metrics import classification_report
+r = classification_report(p['y_val'], preds, output_dict=True, zero_division=0)
+f1_up = r.get('1',{{}}).get('f1-score',0)
+f1_down = r.get('0',{{}}).get('f1-score',0)
+with open(r'{model_path}', 'wb') as f:
+    pickle.dump({{'model':m, 'acc':acc, 'imp':imp, 'f1_up':f1_up, 'f1_down':f1_down}}, f)
+'''
+            result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=600)
+            if result.returncode == 0 and os.path.exists(model_path):
+                with open(model_path, 'rb') as f:
+                    data = pickle.load(f)
+                model = data['model']; acc = data['acc']; importance = data['imp']
+                f1_up = data['f1_up']; f1_down = data['f1_down']
+                print(f'\n  [{tag}] 准确率: {acc:.1%} | F1↑: {f1_up:.3f} | F1↓: {f1_down:.3f} '
+                      f'| 训练样本: {len(X_train)} | 验证样本: {len(X_val)}')
+                return model, acc, importance, {'accuracy': acc, 'f1_up': f1_up, 'f1_down': f1_down}
+            else:
+                print(f'  子进程训练失败: {result.stderr[:200]}')
+                return None, 0.0, None, {}
         else:
             raise
+    finally:
+        try: os.remove(train_path)
+        except: pass
+        try: os.rmdir(tmpdir)
+        except: pass
 
     # ── 评估 ──────────────────────────────────────────
     acc   = float(model.score(X_val, y_val))
