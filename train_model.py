@@ -373,6 +373,7 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
     3. class_weight 应对涨跌不均衡
     4. 返回 (model, acc, importance, val_metrics)
     """
+    import gc; gc.collect()  # 清理LightGBM旧内存池
     from lightgbm import LGBMClassifier, early_stopping, log_evaluation
 
     if len(features) < 500:
@@ -419,14 +420,24 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
         verbose           = -1,
     )
 
-    model.fit(
-        X_train, y_train,
-        eval_set=[(X_val, y_val)],
-        callbacks=[
-            early_stopping(stopping_rounds=50, verbose=False),
-            log_evaluation(period=-1),
-        ]
-    )
+    try:
+        model.fit(
+            X_train, y_train,
+            eval_set=[(X_val, y_val)],
+            callbacks=[
+                early_stopping(stopping_rounds=50, verbose=False),
+                log_evaluation(period=-1),
+            ]
+        )
+    except Exception as e:
+        if 'partition' in str(e).lower() or 'ConfigurablePool' in str(e):
+            import gc; gc.collect()
+            # Retry with minimal params
+            model = LGBMClassifier(n_estimators=100, num_leaves=15, max_depth=5,
+                                   random_state=42, verbose=-1, n_jobs=1)
+            model.fit(X_train, y_train)
+        else:
+            raise
 
     # ── 评估 ──────────────────────────────────────────
     acc   = float(model.score(X_val, y_val))
