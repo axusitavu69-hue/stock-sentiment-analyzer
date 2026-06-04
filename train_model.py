@@ -24,6 +24,13 @@ import pandas as pd
 import warnings
 warnings.filterwarnings('ignore')
 
+# 必须先导入lightgbm再导入akshare，避免py_mini_racer内存池冲突
+try:
+    from lightgbm import LGBMClassifier, early_stopping, log_evaluation
+    _LGBM_READY = True
+except:
+    _LGBM_READY = False
+
 # ===================== 配置 =====================
 
 TRAINING_DAYS   = 365          # 改为1年
@@ -373,142 +380,33 @@ def train_model_lgbm(features: list, labels: list, tag: str = "") -> tuple:
     3. class_weight 应对涨跌不均衡
     4. 返回 (model, acc, importance, val_metrics)
     """
-    import gc, subprocess, tempfile
+    import gc, subprocess, tempfile, shutil
     gc.collect()
-    from lightgbm import LGBMClassifier, early_stopping, log_evaluation
 
-    if len(features) < 500:
-        print(f"  [{tag}] 样本不足: {len(features)}条，跳过训练")
-        return None, 0.0, None, {}
-
-    X = np.array(features, dtype=np.float32)
-    y = np.array(labels, dtype=np.int32)
-
-    # ── 时序切割（不随机shuffle，保留时序）──────────────
-    split = int(len(X) * 0.8)
-    X_train, X_val = X[:split], X[split:]
-    y_train, y_val = y[:split], y[split:]
-
-    # 类别权重（多空不均衡时有效）
-    pos_ratio = y_train.mean()
-    scale = (1 - pos_ratio) / (pos_ratio + 1e-9)
-
-    # 根据数据量动态调整参数，避免小数据时OOM
-    n_samples = len(X_train)
-    if n_samples < 5000:
-        n_est, n_leaves, lr = 100, 15, 0.05
-    elif n_samples < 50000:
-        n_est, n_leaves, lr = 300, 31, 0.02
-    elif n_samples < 200000:
-        n_est, n_leaves, lr = 500, 47, 0.01
-    else:
-        n_est, n_leaves, lr = 800, 63, 0.008
-
-    model = LGBMClassifier(
-        n_estimators      = n_est,
-        learning_rate     = lr,
-        num_leaves        = n_leaves,
-        max_depth         = 7,
-        min_child_samples = max(5, min(30, n_samples // 500)),
-        subsample         = 0.8,
-        subsample_freq    = 1,
-        colsample_bytree  = 0.8,
-        reg_alpha         = 0.1,
-        reg_lambda        = 0.1,
-        scale_pos_weight  = scale,
-        random_state      = 42,
-        n_jobs            = -1,
-        verbose           = -1,
-    )
-
-    # Save data to temp file for subprocess training if in-process fails
+    # 使用独立子进程训练，避免mini_racer和LightGBM内存池冲突
     tmpdir = tempfile.mkdtemp()
-    train_path = os.path.join(tmpdir, 'train_data.pkl')
-    model_path = os.path.join(tmpdir, 'model.pkl')
-    params = {
-        'X_train': X_train, 'X_val': X_val, 'y_train': y_train, 'y_val': y_val,
-        'n_est': n_est, 'n_leaves': n_leaves, 'lr': lr, 'scale': scale
-    }
-    with open(train_path, 'wb') as f: pickle.dump(params, f)
+    data_path = os.path.join(tmpdir, 'data.pkl')
+    result_path = os.path.join(tmpdir, 'result.pkl')
+    with open(data_path, 'wb') as f:
+        pickle.dump({'X': np.array(features, dtype=np.float32),
+                      'y': np.array(labels, dtype=np.int32),
+                      'tag': tag, 'samples': len(features), 'stocks': 0}, f)
 
-    try:
-        model.fit(
-            X_train, y_train,
-            eval_set=[(X_val, y_val)],
-            callbacks=[
-                early_stopping(stopping_rounds=50, verbose=False),
-                log_evaluation(period=-1),
-            ]
-        )
-    except Exception as e:
-        err_str = str(e)
-        if 'partition' in err_str.lower() or 'ConfigurablePool' in err_str.lower() or 'FATAL' in err_str:
-            print(f'  内存池冲突，切换子进程训练...')
-            script = f'''
-import pickle, numpy as np, os, sys
-sys.path.insert(0, r'{os.path.dirname(os.path.abspath(__file__))}')
-with open(r'{train_path}', 'rb') as f:
-    p = pickle.load(f)
-from lightgbm import LGBMClassifier, early_stopping, log_evaluation
-m = LGBMClassifier(n_estimators=p['n_est'], learning_rate=p['lr'], num_leaves=p['n_leaves'],
-                   max_depth=7, random_state=42, verbose=-1, n_jobs=1,
-                   scale_pos_weight=p['scale'], min_child_samples=20,
-                   subsample=0.8, colsample_bytree=0.8, reg_alpha=0.1, reg_lambda=0.1)
-m.fit(p['X_train'], p['y_train'],
-      eval_set=[(p['X_val'], p['y_val'])],
-      callbacks=[early_stopping(stopping_rounds=50, verbose=False), log_evaluation(period=-1)])
-acc = float(m.score(p['X_val'], p['y_val']))
-imp = m.feature_importances_
-preds = m.predict(p['X_val'])
-from sklearn.metrics import classification_report
-r = classification_report(p['y_val'], preds, output_dict=True, zero_division=0)
-f1_up = r.get('1',{{}}).get('f1-score',0)
-f1_down = r.get('0',{{}}).get('f1-score',0)
-with open(r'{model_path}', 'wb') as f:
-    pickle.dump({{'model':m, 'acc':acc, 'imp':imp, 'f1_up':f1_up, 'f1_down':f1_down}}, f)
-'''
-            result = subprocess.run([sys.executable, '-c', script], capture_output=True, text=True, timeout=600)
-            if result.returncode == 0 and os.path.exists(model_path):
-                with open(model_path, 'rb') as f:
-                    data = pickle.load(f)
-                model = data['model']; acc = data['acc']; importance = data['imp']
-                f1_up = data['f1_up']; f1_down = data['f1_down']
-                print(f'\n  [{tag}] 准确率: {acc:.1%} | F1↑: {f1_up:.3f} | F1↓: {f1_down:.3f} '
-                      f'| 训练样本: {len(X_train)} | 验证样本: {len(X_val)}')
-                return model, acc, importance, {'accuracy': acc, 'f1_up': f1_up, 'f1_down': f1_down}
-            else:
-                print(f'  子进程训练失败: {result.stderr[:200]}')
-                return None, 0.0, None, {}
-        else:
-            raise
-    finally:
-        try: os.remove(train_path)
-        except: pass
-        try: os.rmdir(tmpdir)
-        except: pass
+    worker = os.path.join(os.path.dirname(os.path.abspath(__file__)), 'train_worker.py')
+    r = subprocess.run([sys.executable, worker, data_path, result_path],
+                       capture_output=True, text=True, timeout=600)
+    if r.stdout: print(r.stdout.strip())
+    if r.stderr: print(r.stderr.strip()[:500])
 
-    # ── 评估 ──────────────────────────────────────────
-    acc   = float(model.score(X_val, y_val))
-    preds = model.predict(X_val)
-    from sklearn.metrics import classification_report
-    report = classification_report(y_val, preds, output_dict=True, zero_division=0)
-    f1_up   = report.get('1', {}).get('f1-score', 0)
-    f1_down = report.get('0', {}).get('f1-score', 0)
-
-    importance = model.feature_importances_
-    n_feat = len(FEATURE_NAMES)
-
-    print(f"\n  [{tag}] 准确率: {acc:.1%} | F1↑: {f1_up:.3f} | F1↓: {f1_down:.3f} "
-          f"| 训练样本: {len(X_train)} | 验证样本: {len(X_val)}")
-    print(f"  特征重要性 ({n_feat}个):")
-    feat_imp = sorted(zip(FEATURE_NAMES[:len(importance)], importance), key=lambda x: -x[1])
-    for name, imp in feat_imp:
-        bar = '█' * int(imp / (importance.max() + 1e-9) * 30)
-        print(f"    {name:14s} {imp:6.1f} {bar}")
-
-    val_metrics = {'accuracy': acc, 'f1_up': f1_up, 'f1_down': f1_down}
-    return model, acc, importance, val_metrics
-
+    if r.returncode == 0 and os.path.exists(result_path):
+        result = pickle.load(open(result_path, 'rb'))
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        return result['model'], result['acc'], result['imp'], {
+            'accuracy': result['acc'], 'f1_up': result['f1_up'], 'f1_down': result['f1_down']}
+    else:
+        shutil.rmtree(tmpdir, ignore_errors=True)
+        print(f'  [{tag}] 训练失败 (exit {r.returncode})')
+        return None, 0.0, None, {}
 
 def save_model_and_tracker(model, acc, importance, samples, stocks,
                            train_rounds, val_metrics, feats=None, lbls=None):
