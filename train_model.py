@@ -741,8 +741,8 @@ def auto_evolve_factors():
     print(f'  活跃: {len(fp.get("active", {}))} | 候选: {len(fp.get("candidates", {}))} '
           f'| 淘汰: {len(fp.get("retired", {}))}')
     for name, s in sorted(sig.items(), key=lambda x: -x[1]):
-        icon = '✅' if s >= 0.3 else ('⚠️' if s >= 0.1 else '❌')
-        bar  = '▓' * int(s * 20)
+        icon = '[OK]' if s >= 0.3 else ('[!!]' if s >= 0.1 else '[XX]')
+        bar  = '#' * int(s * 20)
         print(f'  {icon} {name:16s} {s:.4f} {bar}')
     print()
 
