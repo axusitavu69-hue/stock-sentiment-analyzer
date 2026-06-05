@@ -36,7 +36,7 @@ except:
 TRAINING_DAYS   = 365          # 改为1年
 TARGET_STOCKS   = 5500         # 目标股票数（全A股）
 BATCH_SIZE      = 50           # 并发批次大小（每批最多同时发50个请求）
-MAX_WORKERS     = 5            # HTTP请求可并发
+MAX_WORKERS     = 2            # 低并发更稳
 CACHE_DIR       = "kline_cache"  # K线本地缓存目录
 MODEL_DIR       = "stock_reports"
 QUANT_TRACKER   = f"{MODEL_DIR}/quant_tracker.json"
